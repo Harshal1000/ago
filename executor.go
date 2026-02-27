@@ -27,6 +27,7 @@ type AgentConfig interface {
 	GetTools() []Tool
 	GetMaxIterations() int
 	GetGenerateConfig() *GenerateConfig
+	GetSystemInstruction() *Content
 }
 
 // Run executes the agentic loop for the given agent config synchronously.
@@ -44,6 +45,17 @@ func Run(ctx context.Context, agent AgentConfig, contents []*Content) (*Executor
 	tools := agent.GetTools()
 	toolMap := buildToolMap(tools)
 	config := agent.GetGenerateConfig()
+	sysInstruction := agent.GetSystemInstruction()
+
+	// Build tool declarations for the LLM.
+	var toolDecls []*FunctionDeclaration
+	if len(tools) > 0 {
+		toolDecls = make([]*FunctionDeclaration, 0, len(tools))
+		for _, t := range tools {
+			toolDecls = append(toolDecls, t.Declaration())
+		}
+	}
+
 	maxIter := agent.GetMaxIterations()
 	if maxIter <= 0 {
 		maxIter = DefaultMaxIterations
@@ -57,7 +69,12 @@ func Run(ctx context.Context, agent AgentConfig, contents []*Content) (*Executor
 			return nil, err
 		}
 
-		resp, err := llm.Generate(ctx, model, history, config)
+		resp, err := llm.Generate(ctx, model, &GenerateParams{
+			Contents:          history,
+			Config:            config,
+			SystemInstruction: sysInstruction,
+			Tools:             toolDecls,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("ago: generate: %w", err)
 		}
@@ -134,6 +151,17 @@ func RunSSE(ctx context.Context, agent AgentConfig, contents []*Content) iter.Se
 		tools := agent.GetTools()
 		toolMap := buildToolMap(tools)
 		config := agent.GetGenerateConfig()
+		sysInstruction := agent.GetSystemInstruction()
+
+		// Build tool declarations for the LLM.
+		var toolDecls []*FunctionDeclaration
+		if len(tools) > 0 {
+			toolDecls = make([]*FunctionDeclaration, 0, len(tools))
+			for _, t := range tools {
+				toolDecls = append(toolDecls, t.Declaration())
+			}
+		}
+
 		maxIter := agent.GetMaxIterations()
 		if maxIter <= 0 {
 			maxIter = DefaultMaxIterations
@@ -151,7 +179,12 @@ func RunSSE(ctx context.Context, agent AgentConfig, contents []*Content) iter.Se
 			// Stream the LLM response, collecting chunks.
 			var lastChunk *StreamChunk
 			var streamErr error
-			for chunk, err := range llm.GenerateStream(ctx, model, history, config) {
+			for chunk, err := range llm.GenerateStream(ctx, model, &GenerateParams{
+				Contents:          history,
+				Config:            config,
+				SystemInstruction: sysInstruction,
+				Tools:             toolDecls,
+			}) {
 				if err != nil {
 					yield(nil, fmt.Errorf("ago: generate stream: %w", err))
 					return

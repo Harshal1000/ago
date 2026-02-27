@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("Set OPENAI_API_KEY environment variable")
+	if os.Getenv("GEMINI_API_KEY") == "" {
+		log.Fatal("Set GEMINI_API_KEY environment variable")
 	}
 
 	// --- Define tools ---
@@ -104,13 +104,17 @@ func main() {
 
 	a := &agent.Agent{
 		Name:    "demo-agent",
-		Backend: agent.BackendOpenAI,
-		Model:   "gpt-4o",
+		Backend: agent.BackendGenAI,
+		Model:   "gemini-2.0-flash",
 		SystemPrompt: `You are a helpful assistant with access to tools.
 Use the calculator for any math. Use current_time when asked about time/date.
 Use word_count to count words. Always use tools rather than guessing.`,
-		Tools:         []ago.Tool{calculatorTool, timeTool, wordCountTool},
-		MaxIterations: 5,
+		Tools: []ago.Tool{calculatorTool, timeTool, wordCountTool},
+		Config: &ago.GenerateConfig{
+			MaxOutputTokens: 1000,
+			Temperature:     &[]float64{0.7}[0],
+		},
+		MaxIterations: 1,
 	}
 
 	if err := a.InitLLM(); err != nil {

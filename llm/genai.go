@@ -72,9 +72,9 @@ func (g *GenAI) Name() string { return "genai" }
 func (g *GenAI) Close() error { return nil }
 
 // Generate performs a single non-streaming completion request and returns the full response and usage.
-func (g *GenAI) Generate(ctx context.Context, model string, contents []*ago.Content, config *ago.GenerateConfig) (*ago.Response, error) {
-	genaiContents := genaiToContents(contents)
-	genaiConfig := genaiToConfig(config)
+func (g *GenAI) Generate(ctx context.Context, model string, params *ago.GenerateParams) (*ago.Response, error) {
+	genaiContents := genaiToContents(params.Contents)
+	genaiConfig := genaiToConfig(params)
 
 	result, err := g.client.Models.GenerateContent(ctx, model, genaiContents, genaiConfig)
 	if err != nil {
@@ -85,9 +85,9 @@ func (g *GenAI) Generate(ctx context.Context, model string, contents []*ago.Cont
 }
 
 // GenerateStream performs a streaming completion and yields ago.StreamChunk values (content deltas, usage, then Done).
-func (g *GenAI) GenerateStream(ctx context.Context, model string, contents []*ago.Content, config *ago.GenerateConfig) iter.Seq2[*ago.StreamChunk, error] {
-	genaiContents := genaiToContents(contents)
-	genaiConfig := genaiToConfig(config)
+func (g *GenAI) GenerateStream(ctx context.Context, model string, params *ago.GenerateParams) iter.Seq2[*ago.StreamChunk, error] {
+	genaiContents := genaiToContents(params.Contents)
+	genaiConfig := genaiToConfig(params)
 
 	return func(yield func(*ago.StreamChunk, error) bool) {
 		for chunk, err := range g.client.Models.GenerateContentStream(ctx, model, genaiContents, genaiConfig) {
@@ -199,63 +199,63 @@ func genaiToParts(parts []*ago.Part) []*genaisdk.Part {
 	return out
 }
 
-// genaiToConfig maps ago.GenerateConfig to genai.GenerateContentConfig.
-func genaiToConfig(config *ago.GenerateConfig) *genaisdk.GenerateContentConfig {
+// genaiToConfig maps ago.GenerateParams to genai.GenerateContentConfig.
+func genaiToConfig(params *ago.GenerateParams) *genaisdk.GenerateContentConfig {
 	cfg := &genaisdk.GenerateContentConfig{}
-	if config == nil {
-		return cfg
+
+	if config := params.Config; config != nil {
+		if config.MaxOutputTokens > 0 {
+			cfg.MaxOutputTokens = int32(config.MaxOutputTokens)
+		}
+		if config.Temperature != nil {
+			t := float32(*config.Temperature)
+			cfg.Temperature = &t
+		}
+		if config.TopP != nil {
+			t := float32(*config.TopP)
+			cfg.TopP = &t
+		}
+		if config.TopK != nil {
+			t := float32(*config.TopK)
+			cfg.TopK = &t
+		}
+		if config.Seed != nil {
+			s := int32(*config.Seed)
+			cfg.Seed = &s
+		}
+		if config.PresencePenalty != nil {
+			p := float32(*config.PresencePenalty)
+			cfg.PresencePenalty = &p
+		}
+		if config.FrequencyPenalty != nil {
+			p := float32(*config.FrequencyPenalty)
+			cfg.FrequencyPenalty = &p
+		}
+		if len(config.StopSequences) > 0 {
+			cfg.StopSequences = config.StopSequences
+		}
+		if config.ResponseMIMEType != "" {
+			cfg.ResponseMIMEType = config.ResponseMIMEType
+		}
+		if config.ResponseSchema != nil {
+			cfg.ResponseSchema = genaiToSchema(config.ResponseSchema)
+		}
+		if config.ThinkingConfig != nil {
+			budget := int32(config.ThinkingConfig.Budget)
+			cfg.ThinkingConfig = &genaisdk.ThinkingConfig{
+				ThinkingBudget: &budget,
+			}
+		}
 	}
 
-	if config.MaxOutputTokens > 0 {
-		cfg.MaxOutputTokens = int32(config.MaxOutputTokens)
-	}
-	if config.Temperature != nil {
-		t := float32(*config.Temperature)
-		cfg.Temperature = &t
-	}
-	if config.TopP != nil {
-		t := float32(*config.TopP)
-		cfg.TopP = &t
-	}
-	if config.TopK != nil {
-		t := float32(*config.TopK)
-		cfg.TopK = &t
-	}
-	if config.Seed != nil {
-		s := int32(*config.Seed)
-		cfg.Seed = &s
-	}
-	if config.PresencePenalty != nil {
-		p := float32(*config.PresencePenalty)
-		cfg.PresencePenalty = &p
-	}
-	if config.FrequencyPenalty != nil {
-		p := float32(*config.FrequencyPenalty)
-		cfg.FrequencyPenalty = &p
-	}
-	if len(config.StopSequences) > 0 {
-		cfg.StopSequences = config.StopSequences
-	}
-	if config.ResponseMIMEType != "" {
-		cfg.ResponseMIMEType = config.ResponseMIMEType
-	}
-	if config.ResponseSchema != nil {
-		cfg.ResponseSchema = genaiToSchema(config.ResponseSchema)
-	}
-	if config.SystemInstruction != nil {
+	if params.SystemInstruction != nil {
 		cfg.SystemInstruction = &genaisdk.Content{
 			Role:  string(genaisdk.RoleUser),
-			Parts: genaiToParts(config.SystemInstruction.Parts),
+			Parts: genaiToParts(params.SystemInstruction.Parts),
 		}
 	}
-	if config.Tools != nil {
-		cfg.Tools = genaiToTools(config.Tools)
-	}
-	if config.ThinkingConfig != nil {
-		budget := int32(config.ThinkingConfig.Budget)
-		cfg.ThinkingConfig = &genaisdk.ThinkingConfig{
-			ThinkingBudget: &budget,
-		}
+	if params.Tools != nil {
+		cfg.Tools = genaiToTools(params.Tools)
 	}
 
 	return cfg

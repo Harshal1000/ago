@@ -2,10 +2,12 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"iter"
 	"os"
+	"strings"
 
 	openaisdk "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -49,52 +51,51 @@ func (o *OpenAI) Close() error {
 }
 
 // Generate performs a non-streaming chat completion.
-func (o *OpenAI) Generate(ctx context.Context, model string, contents []*ago.Content, config *ago.GenerateConfig) (*ago.Response, error) {
-	messages, err := openaiToMessages(contents)
+func (o *OpenAI) Generate(ctx context.Context, model string, params *ago.GenerateParams) (*ago.Response, error) {
+	messages, err := openaiToMessages(params.Contents)
 	if err != nil {
 		return nil, fmt.Errorf("ago: openai: convert contents: %w", err)
 	}
 
-	params := openaisdk.ChatCompletionNewParams{
+	reqParams := openaisdk.ChatCompletionNewParams{
 		Model:    model,
 		Messages: messages,
 	}
 
-	if config != nil {
+	if config := params.Config; config != nil {
 		if config.MaxOutputTokens > 0 {
-			params.MaxCompletionTokens = openaisdk.Int(int64(config.MaxOutputTokens))
+			reqParams.MaxCompletionTokens = openaisdk.Int(int64(config.MaxOutputTokens))
 		}
 		if config.Temperature != nil {
-			params.Temperature = openaisdk.Float(*config.Temperature)
+			reqParams.Temperature = openaisdk.Float(*config.Temperature)
 		}
 		if config.TopP != nil {
-			params.TopP = openaisdk.Float(*config.TopP)
+			reqParams.TopP = openaisdk.Float(*config.TopP)
 		}
 		if len(config.StopSequences) > 0 {
-			params.Stop = openaisdk.ChatCompletionNewParamsStopUnion{
+			reqParams.Stop = openaisdk.ChatCompletionNewParamsStopUnion{
 				OfStringArray: config.StopSequences,
 			}
 		}
 		if config.Seed != nil {
-			params.Seed = openaisdk.Int(int64(*config.Seed))
+			reqParams.Seed = openaisdk.Int(int64(*config.Seed))
 		}
 		if config.PresencePenalty != nil {
-			params.PresencePenalty = openaisdk.Float(*config.PresencePenalty)
+			reqParams.PresencePenalty = openaisdk.Float(*config.PresencePenalty)
 		}
 		if config.FrequencyPenalty != nil {
-			params.FrequencyPenalty = openaisdk.Float(*config.FrequencyPenalty)
-		}
-		if config.SystemInstruction != nil {
-			sysMsg := openaiToSystemMessage(config.SystemInstruction)
-			// Prepend system message
-			params.Messages = append([]openaisdk.ChatCompletionMessageParamUnion{sysMsg}, params.Messages...)
-		}
-		if len(config.Tools) > 0 {
-			params.Tools = openaiToTools(config.Tools)
+			reqParams.FrequencyPenalty = openaisdk.Float(*config.FrequencyPenalty)
 		}
 	}
+	if params.SystemInstruction != nil {
+		sysMsg := openaiToSystemMessage(params.SystemInstruction)
+		reqParams.Messages = append([]openaisdk.ChatCompletionMessageParamUnion{sysMsg}, reqParams.Messages...)
+	}
+	if len(params.Tools) > 0 {
+		reqParams.Tools = openaiToTools(params.Tools)
+	}
 
-	resp, err := o.client.Chat.Completions.New(ctx, params)
+	resp, err := o.client.Chat.Completions.New(ctx, reqParams)
 	if err != nil {
 		return nil, fmt.Errorf("ago: openai: generate: %w", err)
 	}
@@ -103,53 +104,53 @@ func (o *OpenAI) Generate(ctx context.Context, model string, contents []*ago.Con
 }
 
 // GenerateStream performs a streaming chat completion.
-func (o *OpenAI) GenerateStream(ctx context.Context, model string, contents []*ago.Content, config *ago.GenerateConfig) iter.Seq2[*ago.StreamChunk, error] {
+func (o *OpenAI) GenerateStream(ctx context.Context, model string, params *ago.GenerateParams) iter.Seq2[*ago.StreamChunk, error] {
 	return func(yield func(*ago.StreamChunk, error) bool) {
-		messages, err := openaiToMessages(contents)
+		messages, err := openaiToMessages(params.Contents)
 		if err != nil {
 			yield(nil, fmt.Errorf("ago: openai: convert contents: %w", err))
 			return
 		}
 
-		params := openaisdk.ChatCompletionNewParams{
+		reqParams := openaisdk.ChatCompletionNewParams{
 			Model:    model,
 			Messages: messages,
 		}
 
-		if config != nil {
+		if config := params.Config; config != nil {
 			if config.MaxOutputTokens > 0 {
-				params.MaxCompletionTokens = openaisdk.Int(int64(config.MaxOutputTokens))
+				reqParams.MaxCompletionTokens = openaisdk.Int(int64(config.MaxOutputTokens))
 			}
 			if config.Temperature != nil {
-				params.Temperature = openaisdk.Float(*config.Temperature)
+				reqParams.Temperature = openaisdk.Float(*config.Temperature)
 			}
 			if config.TopP != nil {
-				params.TopP = openaisdk.Float(*config.TopP)
+				reqParams.TopP = openaisdk.Float(*config.TopP)
 			}
 			if len(config.StopSequences) > 0 {
-				params.Stop = openaisdk.ChatCompletionNewParamsStopUnion{
+				reqParams.Stop = openaisdk.ChatCompletionNewParamsStopUnion{
 					OfStringArray: config.StopSequences,
 				}
 			}
 			if config.Seed != nil {
-				params.Seed = openaisdk.Int(int64(*config.Seed))
+				reqParams.Seed = openaisdk.Int(int64(*config.Seed))
 			}
 			if config.PresencePenalty != nil {
-				params.PresencePenalty = openaisdk.Float(*config.PresencePenalty)
+				reqParams.PresencePenalty = openaisdk.Float(*config.PresencePenalty)
 			}
 			if config.FrequencyPenalty != nil {
-				params.FrequencyPenalty = openaisdk.Float(*config.FrequencyPenalty)
-			}
-			if config.SystemInstruction != nil {
-				sysMsg := openaiToSystemMessage(config.SystemInstruction)
-				params.Messages = append([]openaisdk.ChatCompletionMessageParamUnion{sysMsg}, params.Messages...)
-			}
-			if len(config.Tools) > 0 {
-				params.Tools = openaiToTools(config.Tools)
+				reqParams.FrequencyPenalty = openaisdk.Float(*config.FrequencyPenalty)
 			}
 		}
+		if params.SystemInstruction != nil {
+			sysMsg := openaiToSystemMessage(params.SystemInstruction)
+			reqParams.Messages = append([]openaisdk.ChatCompletionMessageParamUnion{sysMsg}, reqParams.Messages...)
+		}
+		if len(params.Tools) > 0 {
+			reqParams.Tools = openaiToTools(params.Tools)
+		}
 
-		stream := o.client.Chat.Completions.NewStreaming(ctx, params)
+		stream := o.client.Chat.Completions.NewStreaming(ctx, reqParams)
 		acc := openaisdk.ChatCompletionAccumulator{}
 
 		for stream.Next() {
@@ -287,14 +288,108 @@ func openaiToSystemMessage(c *ago.Content) openaisdk.ChatCompletionMessageParamU
 
 // openaiToUserMessage converts user content to OpenAI user message.
 func openaiToUserMessage(c *ago.Content) (openaisdk.ChatCompletionMessageParamUnion, error) {
-	var text string
+	hasMedia := false
 	for _, p := range c.Parts {
-		if p.Text != "" {
-			text += p.Text
+		if p.InlineData != nil || p.FileData != nil {
+			hasMedia = true
+			break
 		}
-		// TODO: Handle images, files, etc.
 	}
-	return openaisdk.UserMessage(text), nil
+
+	// Text-only fast path (keeps behavior simple when there is no media).
+	if !hasMedia {
+		var text string
+		for _, p := range c.Parts {
+			if p.Text != "" {
+				text += p.Text
+			}
+		}
+		return openaisdk.UserMessage(text), nil
+	}
+
+	// Multimodal path: build array-of-parts content.
+	parts := make([]openaisdk.ChatCompletionContentPartUnionParam, 0, len(c.Parts))
+
+	for _, p := range c.Parts {
+		switch {
+		case p.Text != "":
+			parts = append(parts, openaisdk.ChatCompletionContentPartUnionParam{
+				OfText: &openaisdk.ChatCompletionContentPartTextParam{
+					Text: p.Text,
+				},
+			})
+
+		case p.InlineData != nil:
+			mt := p.InlineData.MIMEType
+			dataB64 := base64.StdEncoding.EncodeToString(p.InlineData.Data)
+
+			switch {
+			case strings.HasPrefix(mt, "image/"):
+				// Encode as data URL so the MIME type travels with the content.
+				url := "data:" + mt + ";base64," + dataB64
+				parts = append(parts, openaisdk.ChatCompletionContentPartUnionParam{
+					OfImageURL: &openaisdk.ChatCompletionContentPartImageParam{
+						ImageURL: openaisdk.ChatCompletionContentPartImageImageURLParam{
+							URL: url,
+						},
+					},
+				})
+
+			case strings.HasPrefix(mt, "audio/"):
+				format := "mp3"
+				if strings.Contains(mt, "wav") {
+					format = "wav"
+				}
+				parts = append(parts, openaisdk.ChatCompletionContentPartUnionParam{
+					OfInputAudio: &openaisdk.ChatCompletionContentPartInputAudioParam{
+						InputAudio: openaisdk.ChatCompletionContentPartInputAudioInputAudioParam{
+							Data:   dataB64,
+							Format: format,
+						},
+					},
+				})
+
+			default:
+				// Generic binary as a file content part.
+				filename := "inline.bin"
+				parts = append(parts, openaisdk.ChatCompletionContentPartUnionParam{
+					OfFile: &openaisdk.ChatCompletionContentPartFileParam{
+						File: openaisdk.ChatCompletionContentPartFileFileParam{
+							FileData: openaisdk.String(dataB64),
+							Filename: openaisdk.String(filename),
+						},
+					},
+				})
+			}
+
+		case p.FileData != nil:
+			file := openaisdk.ChatCompletionContentPartFileFileParam{}
+
+			// If FileURI already holds an OpenAI file_id, pass it through.
+			if strings.HasPrefix(p.FileData.FileURI, "file_") {
+				file.FileID = openaisdk.String(p.FileData.FileURI)
+			}
+			if p.FileData.DisplayName != "" {
+				file.Filename = openaisdk.String(p.FileData.DisplayName)
+			}
+
+			// Only append if we have something meaningful to send.
+			if file.FileID.Value != "" || file.FileData.Value != "" {
+				parts = append(parts, openaisdk.ChatCompletionContentPartUnionParam{
+					OfFile: &openaisdk.ChatCompletionContentPartFileParam{
+						File: file,
+					},
+				})
+			}
+		}
+	}
+
+	msg := openaisdk.ChatCompletionUserMessageParam{
+		Content: openaisdk.ChatCompletionUserMessageParamContentUnion{
+			OfArrayOfContentParts: parts,
+		},
+	}
+	return openaisdk.ChatCompletionMessageParamUnion{OfUser: &msg}, nil
 }
 
 // openaiToAssistantMessage converts assistant/model content to OpenAI assistant message.

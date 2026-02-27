@@ -15,7 +15,7 @@ import (
 type Backend string
 
 const (
-	BackendGenAI Backend = "genai"
+	BackendGenAI  Backend = "genai"
 	BackendOpenAI Backend = "openai"
 )
 
@@ -118,30 +118,29 @@ func (a *Agent) GetModel() string                       { return a.Model }
 func (a *Agent) GetLLM() ago.LLM                        { return a.LLM }
 func (a *Agent) GetTools() []ago.Tool                   { return a.Tools }
 func (a *Agent) GetMaxIterations() int                  { return a.MaxIterations }
-func (a *Agent) GetGenerateConfig() *ago.GenerateConfig { return a.BuildConfig() }
+func (a *Agent) GetGenerateConfig() *ago.GenerateConfig { return a.copyConfig() }
+
+// GetSystemInstruction returns the agent's system prompt as a Content value,
+// or nil if no system prompt is set.
+func (a *Agent) GetSystemInstruction() *ago.Content {
+	if a.SystemPrompt == "" {
+		return nil
+	}
+	return ago.NewTextContent(ago.RoleSystem, a.SystemPrompt)
+}
 
 // Compile-time check.
 var _ ago.AgentConfig = (*Agent)(nil)
 
-// BuildConfig merges the agent's default Config with SystemPrompt and tool declarations.
-func (a *Agent) BuildConfig() *ago.GenerateConfig {
+// copyConfig returns a copy of the agent's Config (or an empty config if nil),
+// so the executor never mutates the original.
+func (a *Agent) copyConfig() *ago.GenerateConfig {
 	cfg := a.Config
 	if cfg == nil {
 		cfg = &ago.GenerateConfig{}
 	} else {
-		// Copy so we don't mutate the agent's config.
 		copy := *cfg
 		cfg = &copy
-	}
-	if a.SystemPrompt != "" && cfg.SystemInstruction == nil {
-		cfg.SystemInstruction = ago.NewTextContent(ago.RoleSystem, a.SystemPrompt)
-	}
-	if len(a.Tools) > 0 {
-		decls := make([]*ago.FunctionDeclaration, 0, len(a.Tools))
-		for _, t := range a.Tools {
-			decls = append(decls, t.Declaration())
-		}
-		cfg.Tools = decls
 	}
 	return cfg
 }
