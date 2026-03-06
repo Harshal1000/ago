@@ -8,18 +8,15 @@ import (
 	"github.com/Harshal1000/ago"
 )
 
-// AgentTool wraps another agent as a tool. The sub-agent is looked up
-// from the registry by AgentName at execution time, avoiding import cycles.
+// AgentTool wraps another agent as a tool, enabling multi-agent architectures.
+// The sub-agent runs ephemerally — no storage, no history, current turn only.
+// Assign a cheaper/smaller model to Agent to reduce cost for delegatable subtasks.
 type AgentTool struct {
 	ToolName    string
 	Description string
-	Parameters  *ago.Schema // nil defaults to {"input": string}
-	AgentName   string      // agent name to look up at execution time
+	Parameters  *ago.Schema     // nil defaults to {"input": string}
+	Agent       ago.AgentConfig // sub-agent to run
 	ToolOptions ago.ToolOptions
-
-	// RunFunc is the function used to run the sub-agent. Defaults to nil;
-	// must be set before execution (typically to ago.Run via the wiring layer).
-	RunFunc func(ctx context.Context, agentName string, contents []*ago.Content) (*ago.ExecutorResult, error)
 }
 
 // Name returns the tool name.
@@ -44,18 +41,16 @@ func (t *AgentTool) Declaration() *ago.FunctionDeclaration {
 	}
 }
 
-// Execute runs the sub-agent by looking it up from the registry and calling RunFunc.
+// Execute runs the sub-agent ephemerally (no storage, no history) and returns its text response.
 func (t *AgentTool) Execute(ctx context.Context, args map[string]any) (*ago.ToolResult, error) {
-	if t.RunFunc == nil {
-		return nil, fmt.Errorf("ago: AgentTool %q has no RunFunc configured", t.ToolName)
+	if t.Agent == nil {
+		return nil, fmt.Errorf("ago: AgentTool %q has no Agent configured", t.ToolName)
 	}
 
-	// Build user content from args.
 	var inputText string
 	if input, ok := args["input"]; ok {
 		inputText = fmt.Sprintf("%v", input)
 	} else {
-		// Serialize all args as the input.
 		var parts []string
 		for k, v := range args {
 			parts = append(parts, fmt.Sprintf("%s: %v", k, v))
@@ -63,20 +58,16 @@ func (t *AgentTool) Execute(ctx context.Context, args map[string]any) (*ago.Tool
 		inputText = strings.Join(parts, "\n")
 	}
 
-	contents := []*ago.Content{
+	result, err := ago.RunEphemeral(ctx, t.Agent, []*ago.Content{
 		ago.NewTextContent(ago.RoleUser, inputText),
-	}
-
-	result, err := t.RunFunc(ctx, t.AgentName, contents)
+	})
 	if err != nil {
-		// Tool-level error — send to model, loop continues.
+		// Tool-level error — sent to model as {"error": "..."}, loop continues.
 		return &ago.ToolResult{Error: err}, nil
 	}
 
-	// Extract text from the response.
-	responseText := extractResponseText(result.Response)
 	return &ago.ToolResult{
-		Response: map[string]any{"result": responseText},
+		Response: map[string]any{"result": extractResponseText(result.Response)},
 	}, nil
 }
 
