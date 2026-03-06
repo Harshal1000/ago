@@ -14,6 +14,7 @@ import (
 	_ "github.com/Harshal1000/ago/llm"
 	"github.com/Harshal1000/ago/storage"
 	"github.com/Harshal1000/ago/tools"
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -178,7 +179,7 @@ Always use tools rather than guessing.`,
 	fmt.Println(strings.Repeat("=", 60))
 
 	var sessionID string
-	opts := &ago.RunOptions{UserID: "demo-user", Author: mainAgent.Name}
+	opts := &ago.RunOptions{UserID: uuid.New().String(), Author: mainAgent.Name}
 
 	turns := []string{
 		"My name is Harshal. What is 25 * 4?",

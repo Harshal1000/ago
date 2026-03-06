@@ -17,13 +17,13 @@ type ModalityTokenCount struct {
 
 // TokenUsage reports detailed token consumption for an LLM request.
 type TokenUsage struct {
-	PromptTokenCount           int32                `json:"promptTokenCount,omitempty"`
-	CandidatesTokenCount       int32                `json:"candidatesTokenCount,omitempty"`
-	TotalTokenCount            int32                `json:"totalTokenCount,omitempty"`
-	CachedContentTokenCount    int32                `json:"cachedContentTokenCount,omitempty"`
-	ThoughtsTokenCount         int32                `json:"thoughtsTokenCount,omitempty"`
-	ToolUsePromptTokenCount    int32                `json:"toolUsePromptTokenCount,omitempty"`
-	TrafficType                string               `json:"trafficType,omitempty"`
+	PromptTokenCount           int32                 `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount       int32                 `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount            int32                 `json:"totalTokenCount,omitempty"`
+	CachedContentTokenCount    int32                 `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount         int32                 `json:"thoughtsTokenCount,omitempty"`
+	ToolUsePromptTokenCount    int32                 `json:"toolUsePromptTokenCount,omitempty"`
+	TrafficType                string                `json:"trafficType,omitempty"`
 	CacheTokensDetails         []*ModalityTokenCount `json:"cacheTokensDetails,omitempty"`
 	CandidatesTokensDetails    []*ModalityTokenCount `json:"candidatesTokensDetails,omitempty"`
 	PromptTokensDetails        []*ModalityTokenCount `json:"promptTokensDetails,omitempty"`
@@ -38,11 +38,11 @@ type TokenUsage struct {
 type FinishReason string
 
 const (
-	FinishReasonStop         FinishReason = "stop"
-	FinishReasonMaxTokens    FinishReason = "max_tokens"
-	FinishReasonToolCall     FinishReason = "tool_call"
-	FinishReasonSafety       FinishReason = "safety"
-	FinishReasonError        FinishReason = "error"
+	FinishReasonStop      FinishReason = "stop"
+	FinishReasonMaxTokens FinishReason = "max_tokens"
+	FinishReasonToolCall  FinishReason = "tool_call"
+	FinishReasonSafety    FinishReason = "safety"
+	FinishReasonError     FinishReason = "error"
 )
 
 // ---------------------------------------------------------------------------

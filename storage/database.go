@@ -54,8 +54,8 @@ var _ Service = (*database)(nil)
 func (db *database) migrate(ctx context.Context) error {
 	ddl := `
 CREATE TABLE IF NOT EXISTS sessions (
-    id         TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL DEFAULT '',
+    id         UUID PRIMARY KEY,
+    user_id    UUID NOT NULL,
     author     TEXT NOT NULL DEFAULT '',
     title      TEXT NOT NULL DEFAULT '',
     metadata   JSONB,
@@ -64,13 +64,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     deleted_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_author ON sessions(author);
 
 CREATE TABLE IF NOT EXISTS events (
-    id         TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    message_id TEXT NOT NULL DEFAULT '',
-    user_id    TEXT NOT NULL DEFAULT '',
+    id         UUID PRIMARY KEY,
+    session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    message_id UUID NOT NULL,
+    user_id    UUID NOT NULL,
     content    JSONB NOT NULL,
     error      TEXT NOT NULL DEFAULT '',
     usage      JSONB,
@@ -78,8 +77,6 @@ CREATE TABLE IF NOT EXISTS events (
     metadata   JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
-CREATE INDEX IF NOT EXISTS idx_events_message_id ON events(message_id);
-CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);
 `
 	if _, err := db.pool.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("ago: storage: migrate: %w", err)
