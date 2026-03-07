@@ -38,6 +38,11 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 	sysInstruction := agent.GetSystemInstruction()
 	maxIter := maxIterations(agent)
 
+	var hooks *Hooks
+	if app != nil {
+		hooks = app.Hooks
+	}
+
 	rec := newRecorder(app, agent.GetName(), opts)
 	includeHistory := app != nil && app.IncludeHistory
 	history, err := initHistory(ctx, rec, contents, includeHistory)
@@ -53,14 +58,25 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 			return nil, err
 		}
 
-		resp, err := llm.Generate(ctx, model, &GenerateParams{
+		params := &GenerateParams{
 			Contents:          history,
 			Config:            config,
 			SystemInstruction: sysInstruction,
 			Tools:             toolDecls,
-		})
+		}
+		if hooks != nil && hooks.BeforeLLMCall != nil {
+			if err := hooks.BeforeLLMCall(ctx, params); err != nil {
+				return nil, err
+			}
+		}
+
+		resp, err := llm.Generate(ctx, model, params)
 		if err != nil {
 			return nil, fmt.Errorf("ago: generate: %w", err)
+		}
+
+		if hooks != nil && hooks.AfterLLMCall != nil {
+			hooks.AfterLLMCall(ctx, resp)
 		}
 
 		calls := extractFunctionCalls(resp)
@@ -72,7 +88,11 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 					rec.BufferWithUsage(mc, &resp.Usage)
 				}
 			}
-			return &RunResult{Response: resp, History: history, SessionID: rec.SessionID()}, nil
+			result := &RunResult{Response: resp, History: history, SessionID: rec.SessionID()}
+			if hooks != nil && hooks.OnComplete != nil {
+				hooks.OnComplete(ctx, result)
+			}
+			return result, nil
 		}
 
 		callContent := NewFunctionCallContent(calls...)
@@ -81,7 +101,7 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 			rec.Buffer(callContent)
 		}
 
-		results, infraErr := executeToolsParallel(ctx, calls, toolMap)
+		results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
 		if infraErr != nil {
 			return nil, infraErr
 		}
@@ -94,11 +114,15 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 		}
 
 		if allSkip && len(calls) > 0 {
-			return &RunResult{
+			result := &RunResult{
 				Response:  synthesizeToolResponse(funcResponses),
 				History:   history,
 				SessionID: rec.SessionID(),
-			}, nil
+			}
+			if hooks != nil && hooks.OnComplete != nil {
+				hooks.OnComplete(ctx, result)
+			}
+			return result, nil
 		}
 	}
 
@@ -126,6 +150,11 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 		sysInstruction := agent.GetSystemInstruction()
 		maxIter := maxIterations(agent)
 
+		var hooks *Hooks
+		if app != nil {
+			hooks = app.Hooks
+		}
+
 		rec := newRecorder(app, agent.GetName(), opts)
 		includeHistory := app != nil && app.IncludeHistory
 		history, err := initHistory(ctx, rec, contents, includeHistory)
@@ -143,14 +172,22 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 				return
 			}
 
-			var lastChunk *StreamChunk
-			var streamErr error
-			for chunk, err := range llm.GenerateStream(ctx, model, &GenerateParams{
+			params := &GenerateParams{
 				Contents:          history,
 				Config:            config,
 				SystemInstruction: sysInstruction,
 				Tools:             toolDecls,
-			}) {
+			}
+			if hooks != nil && hooks.BeforeLLMCall != nil {
+				if err := hooks.BeforeLLMCall(ctx, params); err != nil {
+					yield(nil, err)
+					return
+				}
+			}
+
+			var lastChunk *StreamChunk
+			var streamErr error
+			for chunk, err := range llm.GenerateStream(ctx, model, params) {
 				if err != nil {
 					yield(nil, fmt.Errorf("ago: generate stream: %w", err))
 					return
@@ -177,6 +214,9 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 				if rec != nil && len(lastChunk.Candidates) > 0 && lastChunk.Candidates[0].Content != nil {
 					rec.BufferWithUsage(lastChunk.Candidates[0].Content, lastChunk.Usage)
 				}
+				if hooks != nil && hooks.OnComplete != nil {
+					hooks.OnComplete(ctx, &RunResult{History: history, SessionID: rec.SessionID()})
+				}
 				yield(lastChunk, nil)
 				return
 			}
@@ -187,7 +227,7 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 				rec.Buffer(callContent)
 			}
 
-			results, infraErr := executeToolsParallel(ctx, calls, toolMap)
+			results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
 			if infraErr != nil {
 				yield(nil, infraErr)
 				return
@@ -201,6 +241,9 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 			}
 
 			if allSkip && len(calls) > 0 {
+				if hooks != nil && hooks.OnComplete != nil {
+					hooks.OnComplete(ctx, &RunResult{History: history, SessionID: rec.SessionID()})
+				}
 				yield(&StreamChunk{
 					Candidates: synthesizeToolResponse(funcResponses).Candidates,
 					Complete:   true,

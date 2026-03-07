@@ -7,6 +7,30 @@ import (
 	"github.com/Harshal1000/ago/storage"
 )
 
+// Hooks holds optional callbacks that fire at key points in the agentic loop.
+// All fields are optional; nil fields are silently skipped.
+type Hooks struct {
+	// BeforeLLMCall fires before each LLM call in the agentic loop.
+	// Return a non-nil error to abort the loop immediately as an infrastructure error.
+	BeforeLLMCall func(ctx context.Context, params *GenerateParams) error
+
+	// AfterLLMCall fires after each blocking LLM call in run().
+	// Not called during RunSSE (streaming has no single *Response object).
+	AfterLLMCall func(ctx context.Context, resp *Response)
+
+	// BeforeToolCall fires before each tool is executed (in parallel goroutines).
+	// Return a non-nil error to abort the agentic loop immediately as an infrastructure error.
+	BeforeToolCall func(ctx context.Context, call *FunctionCall) error
+
+	// AfterToolCall fires after each tool finishes, including tools that returned errors.
+	// result.Error is set if the tool returned a tool-level error.
+	AfterToolCall func(ctx context.Context, call *FunctionCall, result *ToolResult)
+
+	// OnComplete fires once when the agentic loop finishes successfully.
+	// Called in both run() (with full RunResult) and runSSE() (with partial RunResult: history + nil Response).
+	OnComplete func(ctx context.Context, result *RunResult)
+}
+
 // App holds app-level infrastructure shared across all agents and sessions.
 // Create one App per application; pass it to Run, RunSSE, and Compact.
 type App struct {
@@ -21,6 +45,9 @@ type App struct {
 	// IncludeHistory, when true, prepends stored conversation history into
 	// the LLM context on every turn. Requires Storage to be set.
 	IncludeHistory bool
+
+	// Hooks is an optional set of callbacks for observing the agentic loop.
+	Hooks *Hooks
 }
 
 // RunOptions carries per-turn session identity.

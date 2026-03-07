@@ -121,7 +121,7 @@ type toolExecResult struct {
 	err    error
 }
 
-func executeToolsParallel(ctx context.Context, calls []*FunctionCall, toolMap map[string]Tool) ([]*ToolResult, error) {
+func executeToolsParallel(ctx context.Context, calls []*FunctionCall, toolMap map[string]Tool, hooks *Hooks) ([]*ToolResult, error) {
 	results := make([]*ToolResult, len(calls))
 	ch := make(chan toolExecResult, len(calls))
 	var wg sync.WaitGroup
@@ -133,11 +133,20 @@ func executeToolsParallel(ctx context.Context, calls []*FunctionCall, toolMap ma
 			continue
 		}
 		wg.Add(1)
-		go func(idx int, t Tool, args map[string]any) {
+		go func(idx int, t Tool, c *FunctionCall) {
 			defer wg.Done()
-			tr, err := t.Execute(ctx, args)
+			if hooks != nil && hooks.BeforeToolCall != nil {
+				if err := hooks.BeforeToolCall(ctx, c); err != nil {
+					ch <- toolExecResult{index: idx, err: err}
+					return
+				}
+			}
+			tr, err := t.Execute(ctx, c.Args)
+			if err == nil && hooks != nil && hooks.AfterToolCall != nil {
+				hooks.AfterToolCall(ctx, c, tr)
+			}
 			ch <- toolExecResult{index: idx, result: tr, err: err}
-		}(i, tool, call.Args)
+		}(i, tool, call)
 	}
 
 	go func() {
