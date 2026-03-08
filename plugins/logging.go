@@ -17,20 +17,6 @@ import (
 
 // LoggingHooks returns a *ago.Hooks that prints a structured, visual log of
 // every agent's execution to w. Pass nil to write to os.Stderr.
-//
-// Each agent's turns are labelled with its name so sequential, parallel, loop,
-// and orchestrate strategies are easy to follow at a glance:
-//
-//	[ago] ┌─ planner · turn 1 ────────────────────────────
-//	[ago] │ User: Write a plan to learn Go
-//	[ago] │ ▶  llm   1 messages
-//	[ago] │ ◀  llm   143 tokens · 36 in · 107 out        1.48s
-//	[ago] └─ planner ✓  session=abc · history=2 · 1.48s
-//	[ago]
-//	[ago] ┌─ writer · turn 1 ──────────────────────────────
-//	[ago] │ ▶  llm   2 messages
-//	[ago] │ ◀  llm   312 tokens · ...                    2.10s
-//	[ago] └─ writer ✓  history=3 · 3.58s
 func LoggingHooks(w io.Writer) *ago.Hooks {
 	if w == nil {
 		w = os.Stderr
@@ -86,11 +72,11 @@ func (p *loggingPlugin) state(name string) *agentState {
 }
 
 func agentName(ctx context.Context) string {
-	name, _ := ctx.Value(ago.AgentContextKey{}).(string)
-	if name == "" {
-		return "agent"
+	rc := ago.GetRunContext(ctx)
+	if rc.AgentName != "" {
+		return rc.AgentName
 	}
-	return name
+	return "agent"
 }
 
 func (p *loggingPlugin) beforeLLM(ctx context.Context, params *ago.GenerateParams) error {
@@ -166,11 +152,11 @@ func (p *loggingPlugin) onComplete(ctx context.Context, result *ago.RunResult) {
 	var total time.Duration
 	if s := p.states[name]; s != nil {
 		total = time.Since(s.runStart)
-		delete(p.states, name) // reset for next run of this agent
+		delete(p.states, name)
 	}
 	p.mu.Unlock()
 
-	if text := extractResponseText(result.Response); text != "" {
+	if text := ago.ExtractResponseText(result.Response); text != "" {
 		p.writef("│ %s", truncateLines(text, 5, 120))
 	}
 	sessionPart := ""
@@ -200,19 +186,6 @@ func extractUserText(contents []*ago.Content) string {
 		}
 	}
 	return "(no user message)"
-}
-
-func extractResponseText(resp *ago.Response) string {
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return ""
-	}
-	var parts []string
-	for _, p := range resp.Candidates[0].Content.Parts {
-		if p.Text != "" {
-			parts = append(parts, p.Text)
-		}
-	}
-	return strings.Join(parts, "")
 }
 
 // ----------- formatting helpers -----------
@@ -275,7 +248,7 @@ func truncate(s string, n int) string {
 }
 
 // truncateLines returns the first maxLines non-empty lines of s, with each
-// line capped at maxWidth characters. Appended "…" if lines were dropped.
+// line capped at maxWidth characters.
 func truncateLines(s string, maxLines, maxWidth int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	var out []string

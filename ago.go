@@ -9,10 +9,10 @@
 //     These are the building blocks shared by all backends and the executor.
 //
 //   - App (ago.App): The primary entry point. Holds app-level infrastructure (storage,
-//     history policy) and exposes Run, RunSSE, and Compact.
+//     history policy) and exposes Run and RunSSE.
 //
 //   - Agent (ago/agent): A configuration struct that bundles a backend, model, system prompt,
-//     tools, and generation config into a single reusable unit.
+//     tools, and generation config into a single reusable unit. Implements Runner and Streamer.
 //
 //   - LLM backends (ago/llm): Implementations of the LLM interface for specific providers.
 //     Import ago/llm with a blank import to auto-register all backends via init().
@@ -21,10 +21,13 @@
 //
 //  1. Create an App with optional storage: app := &ago.App{Storage: svc, IncludeHistory: true}
 //  2. Create an agent.Agent with a backend, model, system prompt, and tools.
-//  3. Call app.Run(ctx, agent, messages, opts) or app.RunSSE for streaming.
+//  3. Call app.Run(ctx, nil, messages, opts) or app.RunSSE for streaming.
 package ago
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // Roles
@@ -38,7 +41,6 @@ const (
 	RoleModel  Role = "model"
 	RoleSystem Role = "system"
 	RoleTool   Role = "tool"
-	RoleAgent  Role = "agent" // strategy-level agent-to-agent call/response
 )
 
 // ---------------------------------------------------------------------------
@@ -194,24 +196,6 @@ func NewFunctionResponseContent(responses ...*FunctionResponse) *Content {
 	return &Content{Role: RoleTool, Parts: parts}
 }
 
-// NewAgentCallContent returns agent Content (strategy-level) representing a call to a sub-agent.
-func NewAgentCallContent(calls ...*FunctionCall) *Content {
-	parts := make([]*Part, len(calls))
-	for i, c := range calls {
-		parts[i] = &Part{FunctionCall: c}
-	}
-	return &Content{Role: RoleAgent, Parts: parts}
-}
-
-// NewAgentResponseContent returns agent Content (strategy-level) representing a sub-agent response.
-func NewAgentResponseContent(responses ...*FunctionResponse) *Content {
-	parts := make([]*Part, len(responses))
-	for i, r := range responses {
-		parts[i] = &Part{FunctionResponse: r}
-	}
-	return &Content{Role: RoleAgent, Parts: parts}
-}
-
 // NewUserContent returns user Content built from the given parts.
 func NewUserContent(parts ...*Part) *Content {
 	return &Content{Role: RoleUser, Parts: parts}
@@ -249,4 +233,30 @@ func BlobPart(mimeType string, data []byte) *Part {
 // FileDataPart returns a Part that references data by URI.
 func FileDataPart(mimeType, fileURI string) *Part {
 	return &Part{FileData: &FileData{MIMEType: mimeType, FileURI: fileURI}}
+}
+
+// ---------------------------------------------------------------------------
+// Text Extraction Helpers
+// ---------------------------------------------------------------------------
+
+// ExtractText returns the text from the first candidate of a RunResult.
+func ExtractText(r *RunResult) string {
+	if r == nil || r.Response == nil || len(r.Response.Candidates) == 0 {
+		return ""
+	}
+	return ExtractResponseText(r.Response)
+}
+
+// ExtractResponseText returns the text from the first candidate of a Response.
+func ExtractResponseText(resp *Response) string {
+	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
+		return ""
+	}
+	var parts []string
+	for _, p := range resp.Candidates[0].Content.Parts {
+		if p.Text != "" {
+			parts = append(parts, p.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }

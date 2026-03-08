@@ -207,7 +207,7 @@ Synthesize results into a final answer.`,
 	timeout := 30 * time.Second
 
 	// ---------------------------------------------------------------------------
-	// 1. Single agent (app.Strategy field)
+	// 1. Single agent (app.Runner field)
 	// ---------------------------------------------------------------------------
 	fmt.Println("\n=== 1. Single Agent ===")
 	singleApp := &ago.App{
@@ -216,7 +216,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy:       plannerAgent,
+		Runner:         plannerAgent,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	result, err := singleApp.Run(ctx, nil, []*ago.Content{
@@ -226,7 +226,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("single agent error: %v", err)
 	} else {
-		fmt.Printf("Planner: %s\n", firstLine(extractText(result)))
+		fmt.Printf("Planner: %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy:       ago.Sequential(plannerAgent, writerAgent),
+		Runner:         ago.Sequential(plannerAgent, writerAgent),
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	result, err = seqApp.Run(ctx, nil, []*ago.Content{
@@ -249,7 +249,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("sequential error: %v", err)
 	} else {
-		fmt.Printf("Final article (first line): %s\n", firstLine(extractText(result)))
+		fmt.Printf("Final article (first line): %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -262,7 +262,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy:       ago.Parallel(researchAgent1, researchAgent2).Aggregate(synthAgent),
+		Runner:         ago.Parallel(researchAgent1, researchAgent2).Aggregate(synthAgent),
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	result, err = parallelApp.Run(ctx, nil, []*ago.Content{
@@ -272,7 +272,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("parallel error: %v", err)
 	} else {
-		fmt.Printf("Synthesis (first line): %s\n", firstLine(extractText(result)))
+		fmt.Printf("Synthesis (first line): %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -285,7 +285,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy: ago.Loop(criticAgent, refinerAgent).
+		Runner: ago.Loop(criticAgent, refinerAgent).
 			Max(3).
 			Until(func(output string) bool { return strings.Contains(output, "APPROVED") }),
 	}
@@ -297,7 +297,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("loop error: %v", err)
 	} else {
-		fmt.Printf("Final text (first line): %s\n", firstLine(extractText(result)))
+		fmt.Printf("Final text (first line): %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy:       ago.Orchestrate(coordinatorAgent, helperAgent),
+		Runner:         ago.Orchestrate(coordinatorAgent, helperAgent),
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	result, err = orchApp.Run(ctx, nil, []*ago.Content{
@@ -320,7 +320,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("orchestrate error: %v", err)
 	} else {
-		fmt.Printf("Coordinator answer (first line): %s\n", firstLine(extractText(result)))
+		fmt.Printf("Coordinator answer (first line): %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -333,7 +333,7 @@ Synthesize results into a final answer.`,
 		HistoryLimit:   20,
 		IncludeHistory: false,
 		Hooks:          plugins.LoggingHooks(nil),
-		Strategy: ago.Sequential(
+		Runner: ago.Sequential(
 			ago.Parallel(researchAgent1, researchAgent2).Aggregate(synthAgent),
 			writerAgent,
 		),
@@ -346,7 +346,7 @@ Synthesize results into a final answer.`,
 	if err != nil {
 		log.Printf("nested error: %v", err)
 	} else {
-		fmt.Printf("Final article (first line): %s\n", firstLine(extractText(result)))
+		fmt.Printf("Final article (first line): %s\n", firstLine(ago.ExtractText(result)))
 	}
 
 	// ---------------------------------------------------------------------------
@@ -367,23 +367,6 @@ Synthesize results into a final answer.`,
 			fmt.Printf("Stream complete.\n")
 		}
 	}
-}
-
-func extractText(r *ago.RunResult) string {
-	if r == nil || r.Response == nil || len(r.Response.Candidates) == 0 {
-		return ""
-	}
-	c := r.Response.Candidates[0].Content
-	if c == nil {
-		return ""
-	}
-	var parts []string
-	for _, p := range c.Parts {
-		if p.Text != "" {
-			parts = append(parts, p.Text)
-		}
-	}
-	return strings.Join(parts, "")
 }
 
 func firstLine(s string) string {

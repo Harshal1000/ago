@@ -6,10 +6,6 @@ import (
 	"iter"
 )
 
-// AgentContextKey is the context key used to store the current agent name.
-// Hook callbacks can read it via ctx.Value(ago.AgentContextKey{}).(string).
-type AgentContextKey struct{}
-
 // DefaultMaxIterations is the default maximum number of agentic loop iterations.
 const DefaultMaxIterations = 10
 
@@ -24,15 +20,17 @@ type AgentConfig interface {
 	GetSystemInstruction() *Content
 }
 
-// RunStrategy runs an AgentConfig through the executor loop.
-// This is the bridge called by *agent.Agent.Execute and strategy implementations.
-func RunStrategy(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) (*RunResult, error) {
-	return run(ctx, app, agent, contents, opts)
-}
+// AgentLoop runs the agentic loop synchronously. Called by agent.Agent.Run().
+func AgentLoop(ctx context.Context, agent AgentConfig, contents []*Content) (*RunResult, error) {
+	rc := GetRunContext(ctx)
+	subRC := &RunContext{
+		AgentName: agent.GetName(),
+		SessionID: rc.SessionID,
+		UserID:    rc.UserID,
+		Hooks:     rc.Hooks,
+	}
+	ctx = WithRunContext(ctx, subRC)
 
-// run executes the agentic loop synchronously.
-func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) (*RunResult, error) {
-	ctx = context.WithValue(ctx, AgentContextKey{}, agent.GetName())
 	llm := agent.GetLLM()
 	if llm == nil {
 		return nil, fmt.Errorf("ago: agent %q has no LLM configured", agent.GetName())
@@ -48,21 +46,10 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 	config := agent.GetGenerateConfig()
 	sysInstruction := agent.GetSystemInstruction()
 	maxIter := maxIterations(agent)
+	hooks := subRC.Hooks
 
-	var hooks *Hooks
-	if app != nil {
-		hooks = app.Hooks
-	}
-
-	rec := newRecorder(app, agent.GetName(), opts)
-	includeHistory := app != nil && app.IncludeHistory
-	history, err := initHistory(ctx, rec, contents, includeHistory)
-	if err != nil {
-		return nil, err
-	}
-	if rec != nil {
-		defer rec.Flush(ctx)
-	}
+	history := make([]*Content, len(contents))
+	copy(history, contents)
 
 	for i := 0; i < maxIter; i++ {
 		if err := ctx.Err(); err != nil {
@@ -93,13 +80,9 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 		calls := extractFunctionCalls(resp)
 		if len(calls) == 0 {
 			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-				mc := resp.Candidates[0].Content
-				history = append(history, mc)
-				if rec != nil {
-					rec.BufferWithUsage(mc, &resp.Usage)
-				}
+				history = append(history, resp.Candidates[0].Content)
 			}
-			result := &RunResult{Response: resp, History: history, SessionID: rec.SessionID()}
+			result := &RunResult{Response: resp, History: history}
 			if hooks != nil && hooks.OnComplete != nil {
 				hooks.OnComplete(ctx, result)
 			}
@@ -108,27 +91,19 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 
 		callContent := NewFunctionCallContent(calls...)
 		history = append(history, callContent)
-		if rec != nil {
-			bufferCallsForStorage(rec, calls, toolMap)
-		}
 
-		results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
+		funcResponses, allSkip, infraErr := loopStep(ctx, calls, toolMap, hooks)
 		if infraErr != nil {
 			return nil, infraErr
 		}
 
-		funcResponses, allSkip := buildFuncResponses(calls, results, toolMap)
 		respContent := NewFunctionResponseContent(funcResponses...)
 		history = append(history, respContent)
-		if rec != nil {
-			bufferResponsesForStorage(rec, calls, funcResponses, toolMap)
-		}
 
 		if allSkip && len(calls) > 0 {
 			result := &RunResult{
-				Response:  synthesizeToolResponse(funcResponses),
-				History:   history,
-				SessionID: rec.SessionID(),
+				Response: synthesizeToolResponse(funcResponses),
+				History:  history,
 			}
 			if hooks != nil && hooks.OnComplete != nil {
 				hooks.OnComplete(ctx, result)
@@ -140,10 +115,18 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 	return nil, fmt.Errorf("ago: agent %q exceeded max iterations (%d)", agent.GetName(), maxIter)
 }
 
-// runSSE executes the agentic loop with streaming, yielding chunks to the caller.
-func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
+// AgentLoopStream runs the agentic loop with streaming. Called by agent.Agent.RunStream().
+func AgentLoopStream(ctx context.Context, agent AgentConfig, contents []*Content) iter.Seq2[*StreamChunk, error] {
 	return func(yield func(*StreamChunk, error) bool) {
-		ctx = context.WithValue(ctx, AgentContextKey{}, agent.GetName())
+		rc := GetRunContext(ctx)
+		subRC := &RunContext{
+			AgentName: agent.GetName(),
+			SessionID: rc.SessionID,
+			UserID:    rc.UserID,
+			Hooks:     rc.Hooks,
+		}
+		ctx = WithRunContext(ctx, subRC)
+
 		llm := agent.GetLLM()
 		if llm == nil {
 			yield(nil, fmt.Errorf("ago: agent %q has no LLM configured", agent.GetName()))
@@ -161,22 +144,10 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 		config := agent.GetGenerateConfig()
 		sysInstruction := agent.GetSystemInstruction()
 		maxIter := maxIterations(agent)
+		hooks := subRC.Hooks
 
-		var hooks *Hooks
-		if app != nil {
-			hooks = app.Hooks
-		}
-
-		rec := newRecorder(app, agent.GetName(), opts)
-		includeHistory := app != nil && app.IncludeHistory
-		history, err := initHistory(ctx, rec, contents, includeHistory)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
-		if rec != nil {
-			defer rec.Flush(ctx)
-		}
+		history := make([]*Content, len(contents))
+		copy(history, contents)
 
 		for i := 0; i < maxIter; i++ {
 			if err := ctx.Err(); err != nil {
@@ -223,11 +194,8 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 
 			calls := extractFunctionCallsFromChunk(lastChunk)
 			if len(calls) == 0 {
-				if rec != nil && len(lastChunk.Candidates) > 0 && lastChunk.Candidates[0].Content != nil {
-					rec.BufferWithUsage(lastChunk.Candidates[0].Content, lastChunk.Usage)
-				}
 				if hooks != nil && hooks.OnComplete != nil {
-					hooks.OnComplete(ctx, &RunResult{History: history, SessionID: rec.SessionID()})
+					hooks.OnComplete(ctx, &RunResult{History: history})
 				}
 				yield(lastChunk, nil)
 				return
@@ -235,26 +203,19 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 
 			callContent := NewFunctionCallContent(calls...)
 			history = append(history, callContent)
-			if rec != nil {
-				bufferCallsForStorage(rec, calls, toolMap)
-			}
 
-			results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
+			funcResponses, allSkip, infraErr := loopStep(ctx, calls, toolMap, hooks)
 			if infraErr != nil {
 				yield(nil, infraErr)
 				return
 			}
 
-			funcResponses, allSkip := buildFuncResponses(calls, results, toolMap)
 			respContent := NewFunctionResponseContent(funcResponses...)
 			history = append(history, respContent)
-			if rec != nil {
-				bufferResponsesForStorage(rec, calls, funcResponses, toolMap)
-			}
 
 			if allSkip && len(calls) > 0 {
 				if hooks != nil && hooks.OnComplete != nil {
-					hooks.OnComplete(ctx, &RunResult{History: history, SessionID: rec.SessionID()})
+					hooks.OnComplete(ctx, &RunResult{History: history})
 				}
 				yield(&StreamChunk{
 					Candidates: synthesizeToolResponse(funcResponses).Candidates,
@@ -266,4 +227,18 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 
 		yield(nil, fmt.Errorf("ago: agent %q exceeded max iterations (%d)", agent.GetName(), maxIter))
 	}
+}
+
+// loopStep executes tool calls, fires hooks, builds responses.
+// Shared between AgentLoop and AgentLoopStream.
+func loopStep(ctx context.Context, calls []*FunctionCall, toolMap map[string]Tool, hooks *Hooks) (
+	funcResponses []*FunctionResponse, allSkip bool, err error) {
+
+	results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
+	if infraErr != nil {
+		return nil, false, infraErr
+	}
+
+	funcResponses, allSkip = buildFuncResponses(calls, results, toolMap)
+	return funcResponses, allSkip, nil
 }

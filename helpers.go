@@ -35,39 +35,6 @@ func buildToolDecls(tools []Tool) []*FunctionDeclaration {
 	return decls
 }
 
-// initHistory sets up the recorder session, loads prior history if configured,
-// then buffers the current user contents for later persistence.
-func initHistory(ctx context.Context, rec *recorder, contents []*Content, includeHistory bool) ([]*Content, error) {
-	if rec != nil {
-		if err := rec.EnsureSession(ctx); err != nil {
-			return nil, fmt.Errorf("ago: storage: %w", err)
-		}
-	}
-
-	history := make([]*Content, len(contents))
-	copy(history, contents)
-
-	// Load stored history BEFORE buffering current turn (avoids duplicates).
-	// Skipped for new sessions (nothing in storage yet) and when includeHistory=false.
-	if rec != nil && includeHistory {
-		prior, err := rec.LoadHistory(ctx)
-		if err == nil && len(prior) > 0 {
-			history = append(prior, history...)
-		}
-	}
-
-	// Buffer incoming contents for persistence, unless this is a sub-agent.
-	// Strategies (Sequential/Parallel/Loop) call bufferStrategyInput once at the
-	// top level, so sub-agents must not re-buffer the same contents.
-	if rec != nil && !rec.skipInputBuffer {
-		for _, c := range contents {
-			rec.Buffer(c)
-		}
-	}
-
-	return history, nil
-}
-
 func extractFunctionCalls(resp *Response) []*FunctionCall {
 	if len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
 		return nil
@@ -163,49 +130,6 @@ func executeToolsParallel(ctx context.Context, calls []*FunctionCall, toolMap ma
 		results[res.index] = res.result
 	}
 	return results, nil
-}
-
-func isAgentCallTool(toolMap map[string]Tool, name string) bool {
-	t, ok := toolMap[name]
-	return ok && t.Options().IsAgentCall
-}
-
-// bufferCallsForStorage stores function calls in the recorder, splitting by IsAgentCall.
-// Agent-transfer calls are stored as RoleAgent; regular tool calls as RoleModel (function call content).
-func bufferCallsForStorage(rec *recorder, calls []*FunctionCall, toolMap map[string]Tool) {
-	var regular, agentCalls []*FunctionCall
-	for _, c := range calls {
-		if isAgentCallTool(toolMap, c.Name) {
-			agentCalls = append(agentCalls, c)
-		} else {
-			regular = append(regular, c)
-		}
-	}
-	if len(regular) > 0 {
-		rec.Buffer(NewFunctionCallContent(regular...))
-	}
-	if len(agentCalls) > 0 {
-		rec.Buffer(NewAgentCallContent(agentCalls...))
-	}
-}
-
-// bufferResponsesForStorage stores function responses in the recorder, splitting by IsAgentCall.
-// Agent-transfer responses are stored as RoleAgent; regular tool responses as RoleTool.
-func bufferResponsesForStorage(rec *recorder, calls []*FunctionCall, responses []*FunctionResponse, toolMap map[string]Tool) {
-	var regular, agentResps []*FunctionResponse
-	for i, c := range calls {
-		if isAgentCallTool(toolMap, c.Name) {
-			agentResps = append(agentResps, responses[i])
-		} else {
-			regular = append(regular, responses[i])
-		}
-	}
-	if len(regular) > 0 {
-		rec.Buffer(NewFunctionResponseContent(regular...))
-	}
-	if len(agentResps) > 0 {
-		rec.Buffer(NewAgentResponseContent(agentResps...))
-	}
 }
 
 func synthesizeToolResponse(responses []*FunctionResponse) *Response {

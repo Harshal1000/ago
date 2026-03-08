@@ -8,14 +8,13 @@ import (
 	"github.com/Harshal1000/ago"
 )
 
-// AgentTool wraps another agent as a tool, enabling multi-agent architectures.
-// The sub-agent runs ephemerally — no storage, no history, current turn only.
-// Assign a cheaper/smaller model to Agent to reduce cost for delegatable subtasks.
+// AgentTool wraps a Runner as a tool, enabling multi-agent architectures.
+// The runner executes ephemerally — no storage, no history, current turn only.
 type AgentTool struct {
 	ToolName    string
 	Description string
-	Parameters  *ago.Schema     // nil defaults to {"input": string}
-	Agent       ago.AgentConfig // sub-agent to run
+	Parameters  *ago.Schema // nil defaults to {"input": string}
+	Runner      ago.Runner  // runner to execute
 	ToolOptions ago.ToolOptions
 }
 
@@ -41,10 +40,10 @@ func (t *AgentTool) Declaration() *ago.FunctionDeclaration {
 	}
 }
 
-// Execute runs the sub-agent ephemerally (no storage, no history) and returns its text response.
+// Execute runs the runner ephemerally (no storage, no history) and returns its text response.
 func (t *AgentTool) Execute(ctx context.Context, args map[string]any) (*ago.ToolResult, error) {
-	if t.Agent == nil {
-		return nil, fmt.Errorf("ago: AgentTool %q has no Agent configured", t.ToolName)
+	if t.Runner == nil {
+		return nil, fmt.Errorf("ago: AgentTool %q has no Runner configured", t.ToolName)
 	}
 
 	var inputText string
@@ -58,34 +57,20 @@ func (t *AgentTool) Execute(ctx context.Context, args map[string]any) (*ago.Tool
 		inputText = strings.Join(parts, "\n")
 	}
 
-	result, err := ago.RunEphemeral(ctx, t.Agent, []*ago.Content{
+	result, err := ago.RunEphemeral(ctx, t.Runner, []*ago.Content{
 		ago.NewTextContent(ago.RoleUser, inputText),
 	})
 	if err != nil {
-		// Tool-level error — sent to model as {"error": "..."}, loop continues.
 		return &ago.ToolResult{Error: err}, nil
 	}
 
 	return &ago.ToolResult{
-		Response: map[string]any{"result": extractResponseText(result.Response)},
+		Response: map[string]any{"result": ago.ExtractText(result)},
 	}, nil
 }
 
 // Options returns the tool's configuration options.
 func (t *AgentTool) Options() ago.ToolOptions { return t.ToolOptions }
-
-func extractResponseText(resp *ago.Response) string {
-	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
-		return ""
-	}
-	var texts []string
-	for _, p := range resp.Candidates[0].Content.Parts {
-		if p.Text != "" {
-			texts = append(texts, p.Text)
-		}
-	}
-	return strings.Join(texts, "\n")
-}
 
 // Compile-time check.
 var _ ago.Tool = (*AgentTool)(nil)

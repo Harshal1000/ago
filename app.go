@@ -2,22 +2,62 @@ package ago
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
+	"time"
 
 	"github.com/Harshal1000/ago/storage"
+	"github.com/google/uuid"
 )
 
 // ---------------------------------------------------------------------------
-// Strategy
+// Runner / Streamer / Named
 // ---------------------------------------------------------------------------
 
-// Strategy defines how an App executes agents.
-// *agent.Agent implements this for single-agent execution.
-// ago.Sequential, ago.Parallel, ago.Loop, and ago.Orchestrate return Strategy for multi-agent.
-type Strategy interface {
-	GetName() string
-	Execute(ctx context.Context, app *App, contents []*Content, opts *RunOptions) (*RunResult, error)
+// Runner executes an agentic task. Runners are pure — they don't touch storage.
+type Runner interface {
+	Run(ctx context.Context, contents []*Content) (*RunResult, error)
+}
+
+// Streamer is optionally implemented by Runners that support streaming.
+type Streamer interface {
+	RunStream(ctx context.Context, contents []*Content) iter.Seq2[*StreamChunk, error]
+}
+
+// Named is optionally implemented by Runners that have a name.
+// Used by Orchestrate to register workers as named tools, and by logging hooks.
+type Named interface {
+	RunnerName() string
+}
+
+// ---------------------------------------------------------------------------
+// RunContext
+// ---------------------------------------------------------------------------
+
+// RunContext carries immutable per-run metadata through context.Context.
+// Hooks, agent name, session ID, and user ID flow through here.
+type RunContext struct {
+	AgentName string
+	SessionID string
+	UserID    string
+	Hooks     *Hooks
+}
+
+type runContextKey struct{}
+
+// WithRunContext returns a new context carrying the given RunContext.
+func WithRunContext(ctx context.Context, rc *RunContext) context.Context {
+	return context.WithValue(ctx, runContextKey{}, rc)
+}
+
+// GetRunContext retrieves the RunContext from ctx, or returns an empty RunContext if none is set.
+func GetRunContext(ctx context.Context) *RunContext {
+	rc, _ := ctx.Value(runContextKey{}).(*RunContext)
+	if rc == nil {
+		return &RunContext{}
+	}
+	return rc
 }
 
 // ---------------------------------------------------------------------------
@@ -28,23 +68,18 @@ type Strategy interface {
 // All fields are optional; nil fields are silently skipped.
 type Hooks struct {
 	// BeforeLLMCall fires before each LLM call in the agentic loop.
-	// Return a non-nil error to abort the loop immediately as an infrastructure error.
 	BeforeLLMCall func(ctx context.Context, params *GenerateParams) error
 
-	// AfterLLMCall fires after each blocking LLM call in run().
-	// Not called during RunSSE (streaming has no single *Response object).
+	// AfterLLMCall fires after each blocking LLM call.
 	AfterLLMCall func(ctx context.Context, resp *Response)
 
 	// BeforeToolCall fires before each tool is executed (in parallel goroutines).
-	// Return a non-nil error to abort the agentic loop immediately as an infrastructure error.
 	BeforeToolCall func(ctx context.Context, call *FunctionCall) error
 
 	// AfterToolCall fires after each tool finishes, including tools that returned errors.
-	// result.Error is set if the tool returned a tool-level error.
 	AfterToolCall func(ctx context.Context, call *FunctionCall, result *ToolResult)
 
 	// OnComplete fires once when the agentic loop finishes successfully.
-	// Called in both run() (with full RunResult) and runSSE() (with partial RunResult: history + nil Response).
 	OnComplete func(ctx context.Context, result *RunResult)
 }
 
@@ -53,9 +88,8 @@ type Hooks struct {
 // ---------------------------------------------------------------------------
 
 // App holds app-level infrastructure shared across all agents and sessions.
-// Create one App per application; pass it to Run, RunSSE, and Compact.
 type App struct {
-	// Name identifies this application. Used as the session Author when set.
+	// Name identifies this application.
 	Name string
 
 	// Description is a human-readable description of this application.
@@ -76,13 +110,8 @@ type App struct {
 	// Hooks is an optional set of callbacks for observing the agentic loop.
 	Hooks *Hooks
 
-	// Strategy is the default strategy used when Run/RunSSE are called with nil agent.
-	Strategy Strategy
-
-	// isSubAgent marks this App as a sub-agent app created by a strategy.
-	// Sub-agent recorders skip buffering their input contents (to avoid
-	// duplicating events that the strategy already stored).
-	isSubAgent bool
+	// Runner is the default runner used when Run/RunSSE are called with nil runner.
+	Runner Runner
 }
 
 // ---------------------------------------------------------------------------
@@ -115,49 +144,157 @@ type RunResult struct {
 }
 
 // ---------------------------------------------------------------------------
-// App methods
+// App.Run
 // ---------------------------------------------------------------------------
 
-// Run executes the strategy synchronously and returns the final result.
-// Pass agent=nil to use app.Strategy; pass a Strategy to override for that call.
+// Run executes a runner synchronously and returns the final result.
+// Pass runner=nil to use app.Runner; pass a Runner to override for that call.
 // Pass opts to enable session persistence; nil opts runs ephemerally.
-func (app *App) Run(ctx context.Context, agent Strategy, contents []*Content, opts *RunOptions) (*RunResult, error) {
-	s := agent
-	if s == nil {
-		s = app.Strategy
+func (app *App) Run(ctx context.Context, runner Runner, contents []*Content, opts *RunOptions) (*RunResult, error) {
+	r := runner
+	if r == nil {
+		r = app.Runner
 	}
-	if s == nil {
-		return nil, fmt.Errorf("ago: no strategy configured")
+	if r == nil {
+		return nil, fmt.Errorf("ago: no runner configured")
 	}
-	return s.Execute(ctx, app, contents, opts)
-}
 
-// RunSSE executes the strategy with streaming, yielding chunks to the caller.
-// If the strategy also implements AgentConfig (i.e. a single *agent.Agent), true
-// streaming is used. Otherwise the strategy runs synchronously and a single final
-// chunk is yielded.
-// Pass agent=nil to use app.Strategy; pass a Strategy to override for that call.
-func (app *App) RunSSE(ctx context.Context, agent Strategy, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
-	s := agent
-	if s == nil {
-		s = app.Strategy
+	rc := &RunContext{Hooks: app.Hooks}
+	if opts != nil {
+		rc.UserID = opts.UserID
 	}
-	if s == nil {
-		return func(yield func(*StreamChunk, error) bool) {
-			yield(nil, fmt.Errorf("ago: no strategy configured"))
+
+	inputLen := len(contents)
+
+	// Storage: create/resume session, store user input, load history.
+	if app.Storage != nil && opts != nil {
+		sid, isNew, err := resolveSession(ctx, app, opts)
+		if err != nil {
+			return nil, err
+		}
+		rc.SessionID = sid
+
+		// Store user input events immediately.
+		storeEvents(ctx, app.Storage, sid, rc.UserID, contents)
+
+		// Load history if configured and session is not brand new.
+		if app.IncludeHistory && !isNew {
+			prior, err := loadHistory(ctx, app.Storage, sid, app.HistoryLimit)
+			if err == nil && len(prior) > 0 {
+				contents = append(prior, contents...)
+			}
 		}
 	}
-	// Single agent: use native streaming path.
-	if ac, ok := s.(AgentConfig); ok {
-		return runSSE(ctx, app, ac, contents, opts)
+
+	ctx = WithRunContext(ctx, rc)
+	result, err := r.Run(ctx, contents)
+	if err != nil {
+		return nil, err
 	}
-	// Multi-agent strategy: run synchronously and emit a single final chunk.
+
+	// Store model events (everything after input contents).
+	if app.Storage != nil && opts != nil && rc.SessionID != "" {
+		newEvents := result.History[inputLen:]
+		if len(newEvents) > 0 {
+			storeEvents(ctx, app.Storage, rc.SessionID, rc.UserID, newEvents)
+		}
+	}
+
+	result.SessionID = rc.SessionID
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// App.RunSSE
+// ---------------------------------------------------------------------------
+
+// RunSSE executes a runner with streaming, yielding chunks to the caller.
+// If the runner implements Streamer, true streaming is used.
+// Otherwise the runner runs synchronously and a single final chunk is yielded.
+func (app *App) RunSSE(ctx context.Context, runner Runner, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
+	r := runner
+	if r == nil {
+		r = app.Runner
+	}
+	if r == nil {
+		return func(yield func(*StreamChunk, error) bool) {
+			yield(nil, fmt.Errorf("ago: no runner configured"))
+		}
+	}
+
+	rc := &RunContext{Hooks: app.Hooks}
+	if opts != nil {
+		rc.UserID = opts.UserID
+	}
+
+	inputLen := len(contents)
+
+	// Storage: create/resume session, store user input, load history.
+	if app.Storage != nil && opts != nil {
+		sid, isNew, err := resolveSession(ctx, app, opts)
+		if err != nil {
+			return func(yield func(*StreamChunk, error) bool) {
+				yield(nil, err)
+			}
+		}
+		rc.SessionID = sid
+		storeEvents(ctx, app.Storage, sid, rc.UserID, contents)
+		if app.IncludeHistory && !isNew {
+			prior, err := loadHistory(ctx, app.Storage, sid, app.HistoryLimit)
+			if err == nil && len(prior) > 0 {
+				contents = append(prior, contents...)
+			}
+		}
+	}
+
+	ctx = WithRunContext(ctx, rc)
+
+	// If runner supports streaming, use it.
+	if s, ok := r.(Streamer); ok {
+		return func(yield func(*StreamChunk, error) bool) {
+			var lastResult *RunResult
+			for chunk, err := range s.RunStream(ctx, contents) {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if chunk.Complete {
+					// Capture for storage.
+					lastResult = &RunResult{
+						History:   contents, // approximate; stream doesn't return full history
+						SessionID: rc.SessionID,
+					}
+				}
+				if !yield(chunk, nil) {
+					return
+				}
+			}
+			// Store model events after stream completes.
+			if app.Storage != nil && opts != nil && rc.SessionID != "" && lastResult != nil {
+				newEvents := lastResult.History[inputLen:]
+				if len(newEvents) > 0 {
+					storeEvents(ctx, app.Storage, rc.SessionID, rc.UserID, newEvents)
+				}
+			}
+		}
+	}
+
+	// Fallback: run synchronously and emit a single final chunk.
 	return func(yield func(*StreamChunk, error) bool) {
-		result, err := s.Execute(ctx, app, contents, opts)
+		result, err := r.Run(ctx, contents)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
+
+		// Store model events.
+		if app.Storage != nil && opts != nil && rc.SessionID != "" {
+			newEvents := result.History[inputLen:]
+			if len(newEvents) > 0 {
+				storeEvents(ctx, app.Storage, rc.SessionID, rc.UserID, newEvents)
+			}
+		}
+
 		chunk := &StreamChunk{Complete: true}
 		if result.Response != nil && len(result.Response.Candidates) > 0 {
 			chunk.Candidates = result.Response.Candidates
@@ -168,19 +305,94 @@ func (app *App) RunSSE(ctx context.Context, agent Strategy, contents []*Content,
 	}
 }
 
-// RunEphemeral runs an agent for a single turn with no storage and no history.
-// Use this for sub-agent calls, one-off queries, or any context where
-// persistence and history are not needed.
-func RunEphemeral(ctx context.Context, agent AgentConfig, contents []*Content) (*RunResult, error) {
-	return run(ctx, nil, agent, contents, nil)
+// ---------------------------------------------------------------------------
+// RunEphemeral
+// ---------------------------------------------------------------------------
+
+// RunEphemeral runs a runner for a single turn with no storage and no history.
+func RunEphemeral(ctx context.Context, runner Runner, contents []*Content) (*RunResult, error) {
+	return runner.Run(ctx, contents)
 }
 
-// Compact summarizes old events for a session into a single summary event,
-// keeping the most recent turns intact. This bounds the cost of LoadHistory
-// as conversations grow long.
-//
-// Not yet implemented — returns nil immediately.
-func (app *App) Compact(ctx context.Context, agent AgentConfig, sessionID string) error {
-	// TODO: load all events, ask LLM to summarize, replace old events with summary event
-	return nil
+// ---------------------------------------------------------------------------
+// Storage helpers (replaces recorder.go)
+// ---------------------------------------------------------------------------
+
+// resolveSession creates or resumes a session. Returns (sessionID, isNew, error).
+func resolveSession(ctx context.Context, app *App, opts *RunOptions) (string, bool, error) {
+	if opts.SessionID != "" {
+		return opts.SessionID, false, nil
+	}
+	sid := newV7()
+	author := opts.Author
+	if author == "" && app.Name != "" {
+		author = app.Name
+	}
+	if err := app.Storage.CreateSession(ctx, &storage.Session{
+		ID:     sid,
+		UserID: opts.UserID,
+		Author: author,
+	}); err != nil {
+		return "", false, fmt.Errorf("ago: storage: %w", err)
+	}
+	return sid, true, nil
+}
+
+// loadHistory retrieves stored events and converts them back to Content slices.
+func loadHistory(ctx context.Context, svc storage.Service, sessionID string, limit int) ([]*Content, error) {
+	events, err := svc.GetRecentEvents(ctx, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	contents := make([]*Content, 0, len(events))
+	for _, e := range events {
+		var c Content
+		if err := json.Unmarshal(e.Content, &c); err != nil {
+			continue
+		}
+		contents = append(contents, &c)
+	}
+	return contents, nil
+}
+
+// storeEvents marshals Content to storage events and batch-inserts them.
+// Errors are silently ignored so storage never breaks the agentic loop.
+func storeEvents(ctx context.Context, svc storage.Service, sessionID, userID string, contents []*Content) {
+	if len(contents) == 0 {
+		return
+	}
+	msgID := newV7()
+	events := make([]*storage.Event, 0, len(contents))
+	for _, c := range contents {
+		data, err := json.Marshal(c)
+		if err != nil {
+			continue
+		}
+		events = append(events, &storage.Event{
+			ID:        newV7(),
+			SessionID: sessionID,
+			MessageID: msgID,
+			UserID:    userID,
+			Content:   data,
+			CreatedAt: time.Now(),
+		})
+	}
+	_ = svc.CreateEvents(ctx, events)
+}
+
+// newV7 generates a UUIDv7 string.
+func newV7() string {
+	return uuid.Must(uuid.NewV7()).String()
+}
+
+// ---------------------------------------------------------------------------
+// Runner name helper
+// ---------------------------------------------------------------------------
+
+// runnerName returns the name of a Runner if it implements Named, or fallback otherwise.
+func runnerName(r Runner, fallback string) string {
+	if n, ok := r.(Named); ok {
+		return n.RunnerName()
+	}
+	return fallback
 }

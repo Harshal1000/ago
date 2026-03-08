@@ -3,7 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
-	"sync"
+	"iter"
 
 	"github.com/Harshal1000/ago"
 )
@@ -42,7 +42,7 @@ func NewLLMFromBackend(b Backend) (ago.LLM, error) {
 // ---------------------------------------------------------------------------
 
 // Agent is a configuration holder describing an LLM-powered agent.
-// Execution is handled by the ago.Run / ago.RunSSE functions.
+// Implements ago.Runner, ago.Streamer, and ago.Named.
 type Agent struct {
 	Name          string              // required identifier
 	Backend       Backend             // which LLM to create (e.g. BackendGenAI)
@@ -54,47 +54,6 @@ type Agent struct {
 
 	// LLM can be set directly to skip Backend-based creation (useful for testing).
 	LLM ago.LLM
-}
-
-// ---------------------------------------------------------------------------
-// Agent Registry
-// ---------------------------------------------------------------------------
-
-var (
-	registry   = map[string]*Agent{}
-	registryMu sync.RWMutex
-)
-
-// Register stores an agent in the global registry. Name must be non-empty and unique.
-func Register(a *Agent) error {
-	if a.Name == "" {
-		return fmt.Errorf("ago: agent Name is required")
-	}
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	if _, exists := registry[a.Name]; exists {
-		return fmt.Errorf("ago: agent %q already registered", a.Name)
-	}
-	registry[a.Name] = a
-	return nil
-}
-
-// Get retrieves an agent by name from the global registry.
-func Get(name string) (*Agent, error) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	a, ok := registry[name]
-	if !ok {
-		return nil, fmt.Errorf("ago: agent %q not found", name)
-	}
-	return a, nil
-}
-
-// ResetRegistry clears all registered agents. Intended for testing only.
-func ResetRegistry() {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	registry = map[string]*Agent{}
 }
 
 // InitLLM lazily creates the LLM from Backend if LLM isn't already set.
@@ -111,7 +70,29 @@ func (a *Agent) InitLLM() error {
 }
 
 // ---------------------------------------------------------------------------
-// AgentConfig interface implementation (for ago.Run / ago.RunSSE)
+// Runner / Streamer / Named implementation
+// ---------------------------------------------------------------------------
+
+// Run implements ago.Runner.
+func (a *Agent) Run(ctx context.Context, contents []*ago.Content) (*ago.RunResult, error) {
+	return ago.AgentLoop(ctx, a, contents)
+}
+
+// RunStream implements ago.Streamer.
+func (a *Agent) RunStream(ctx context.Context, contents []*ago.Content) iter.Seq2[*ago.StreamChunk, error] {
+	return ago.AgentLoopStream(ctx, a, contents)
+}
+
+// RunnerName implements ago.Named.
+func (a *Agent) RunnerName() string { return a.Name }
+
+// Compile-time checks.
+var _ ago.Runner = (*Agent)(nil)
+var _ ago.Streamer = (*Agent)(nil)
+var _ ago.Named = (*Agent)(nil)
+
+// ---------------------------------------------------------------------------
+// AgentConfig interface implementation (for ago.AgentLoop / ago.AgentLoopStream)
 // ---------------------------------------------------------------------------
 
 func (a *Agent) GetName() string                        { return a.Name }
@@ -130,14 +111,7 @@ func (a *Agent) GetSystemInstruction() *ago.Content {
 	return ago.NewTextContent(ago.RoleSystem, a.SystemPrompt)
 }
 
-// Execute implements ago.Strategy, delegating to the ago executor loop.
-func (a *Agent) Execute(ctx context.Context, app *ago.App, contents []*ago.Content, opts *ago.RunOptions) (*ago.RunResult, error) {
-	return ago.RunStrategy(ctx, app, a, contents, opts)
-}
-
-// Compile-time checks.
 var _ ago.AgentConfig = (*Agent)(nil)
-var _ ago.Strategy = (*Agent)(nil)
 
 // copyConfig returns a copy of the agent's Config (or an empty config if nil),
 // so the executor never mutates the original.
