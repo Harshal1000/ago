@@ -3,6 +3,7 @@ package ago
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/Harshal1000/ago/storage"
@@ -13,24 +14,23 @@ import (
 // One recorder is created per Run/RunSSE invocation.
 // Events are buffered in memory and flushed to storage in a single batch on Flush.
 type recorder struct {
-	svc       storage.Service
-	limit     int // HistoryLimit from App (0 = unlimited)
-	sessionID string
-	messageID string // UUIDv7, unique per Run invocation
-	userID    string
-	author    string
-	isNew     bool
-	buf       []*storage.Event // buffered events, flushed in one batch
+	svc             storage.Service
+	limit           int // HistoryLimit from App (0 = unlimited)
+	sessionID       string
+	messageID       string // UUIDv7, unique per Run invocation
+	userID          string
+	author          string
+	agentName       string
+	isNew           bool
+	skipInputBuffer bool             // true for sub-agents; strategy buffers input once at top level
+	buf             []*storage.Event // buffered events, flushed in one batch
 }
 
 // newRecorder builds a recorder from App config and per-turn RunOptions.
-// Returns nil when storage is not configured.
+// Returns nil when storage is not configured or opts is nil (ephemeral run).
 func newRecorder(app *App, agentName string, opts *RunOptions) *recorder {
-	if app == nil || app.Storage == nil {
+	if app == nil || app.Storage == nil || opts == nil {
 		return nil
-	}
-	if opts == nil {
-		opts = &RunOptions{}
 	}
 
 	sid := opts.SessionID
@@ -40,19 +40,50 @@ func newRecorder(app *App, agentName string, opts *RunOptions) *recorder {
 	}
 
 	author := opts.Author
+	if author == "" && app.Name != "" {
+		author = app.Name
+	}
 	if author == "" {
 		author = agentName
 	}
 
 	return &recorder{
-		svc:       app.Storage,
-		limit:     app.HistoryLimit,
-		sessionID: sid,
-		messageID: newV7(),
-		userID:    opts.UserID,
-		author:    author,
-		isNew:     isNew,
+		svc:             app.Storage,
+		limit:           app.HistoryLimit,
+		sessionID:       sid,
+		messageID:       newV7(),
+		userID:          opts.UserID,
+		author:          author,
+		agentName:       agentName,
+		isNew:           isNew,
+		skipInputBuffer: app.isSubAgent,
 	}
+}
+
+// ensureStrategySession creates a storage session for a strategy run if storage
+// is configured and opts has no existing SessionID. Returns updated opts with
+// SessionID set, or the original opts unchanged when nothing needs to be done.
+func ensureStrategySession(ctx context.Context, app *App, strategyName string, opts *RunOptions) (*RunOptions, error) {
+	if app == nil || app.Storage == nil || opts == nil || opts.SessionID != "" {
+		return opts, nil
+	}
+	newOpts := *opts
+	newOpts.SessionID = newV7()
+	author := newOpts.Author
+	if author == "" && app.Name != "" {
+		author = app.Name
+	}
+	if author == "" {
+		author = strategyName
+	}
+	if err := app.Storage.CreateSession(ctx, &storage.Session{
+		ID:     newOpts.SessionID,
+		UserID: newOpts.UserID,
+		Author: author,
+	}); err != nil {
+		return nil, fmt.Errorf("ago: storage: %w", err)
+	}
+	return &newOpts, nil
 }
 
 // SessionID returns the session identifier (auto-generated or resumed).
@@ -92,11 +123,18 @@ func (r *recorder) buffer(c *Content, usage *TokenUsage) {
 	if err != nil {
 		return
 	}
+	// User-role content is always stored without agent attribution —
+	// it belongs to the session, not to any particular agent.
+	agent := r.agentName
+	if c.Role == RoleUser {
+		agent = ""
+	}
 	event := &storage.Event{
 		ID:        newV7(),
 		SessionID: r.sessionID,
 		MessageID: r.messageID,
 		UserID:    r.userID,
+		Agent:     agent,
 		Content:   contentData,
 		CreatedAt: time.Now(),
 	}
@@ -138,6 +176,24 @@ func (r *recorder) LoadHistory(ctx context.Context) ([]*Content, error) {
 		contents = append(contents, &c)
 	}
 	return contents, nil
+}
+
+// bufferStrategyInput stores the incoming user contents once at the strategy level.
+// Called by Sequential, Parallel, and Loop before dispatching sub-agents, so that
+// the shared session has exactly one copy of the user input (not one per sub-agent).
+// Sub-agents skip buffering their own input via skipInputBuffer=true (set by subApp).
+func bufferStrategyInput(ctx context.Context, app *App, opts *RunOptions, contents []*Content) {
+	if app == nil || app.Storage == nil || opts == nil || opts.SessionID == "" {
+		return
+	}
+	rec := newRecorder(app, "", opts)
+	if rec == nil {
+		return
+	}
+	for _, c := range contents {
+		rec.Buffer(c)
+	}
+	rec.Flush(ctx)
 }
 
 // newV7 generates a UUIDv7 string.

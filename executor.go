@@ -6,6 +6,10 @@ import (
 	"iter"
 )
 
+// AgentContextKey is the context key used to store the current agent name.
+// Hook callbacks can read it via ctx.Value(ago.AgentContextKey{}).(string).
+type AgentContextKey struct{}
+
 // DefaultMaxIterations is the default maximum number of agentic loop iterations.
 const DefaultMaxIterations = 10
 
@@ -20,8 +24,15 @@ type AgentConfig interface {
 	GetSystemInstruction() *Content
 }
 
+// RunStrategy runs an AgentConfig through the executor loop.
+// This is the bridge called by *agent.Agent.Execute and strategy implementations.
+func RunStrategy(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) (*RunResult, error) {
+	return run(ctx, app, agent, contents, opts)
+}
+
 // run executes the agentic loop synchronously.
 func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) (*RunResult, error) {
+	ctx = context.WithValue(ctx, AgentContextKey{}, agent.GetName())
 	llm := agent.GetLLM()
 	if llm == nil {
 		return nil, fmt.Errorf("ago: agent %q has no LLM configured", agent.GetName())
@@ -98,7 +109,7 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 		callContent := NewFunctionCallContent(calls...)
 		history = append(history, callContent)
 		if rec != nil {
-			rec.Buffer(callContent)
+			bufferCallsForStorage(rec, calls, toolMap)
 		}
 
 		results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
@@ -110,7 +121,7 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 		respContent := NewFunctionResponseContent(funcResponses...)
 		history = append(history, respContent)
 		if rec != nil {
-			rec.Buffer(respContent)
+			bufferResponsesForStorage(rec, calls, funcResponses, toolMap)
 		}
 
 		if allSkip && len(calls) > 0 {
@@ -132,6 +143,7 @@ func run(ctx context.Context, app *App, agent AgentConfig, contents []*Content, 
 // runSSE executes the agentic loop with streaming, yielding chunks to the caller.
 func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
 	return func(yield func(*StreamChunk, error) bool) {
+		ctx = context.WithValue(ctx, AgentContextKey{}, agent.GetName())
 		llm := agent.GetLLM()
 		if llm == nil {
 			yield(nil, fmt.Errorf("ago: agent %q has no LLM configured", agent.GetName()))
@@ -224,7 +236,7 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 			callContent := NewFunctionCallContent(calls...)
 			history = append(history, callContent)
 			if rec != nil {
-				rec.Buffer(callContent)
+				bufferCallsForStorage(rec, calls, toolMap)
 			}
 
 			results, infraErr := executeToolsParallel(ctx, calls, toolMap, hooks)
@@ -237,7 +249,7 @@ func runSSE(ctx context.Context, app *App, agent AgentConfig, contents []*Conten
 			respContent := NewFunctionResponseContent(funcResponses...)
 			history = append(history, respContent)
 			if rec != nil {
-				rec.Buffer(respContent)
+				bufferResponsesForStorage(rec, calls, funcResponses, toolMap)
 			}
 
 			if allSkip && len(calls) > 0 {

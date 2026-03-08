@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -129,8 +130,14 @@ func (a *Agent) GetSystemInstruction() *ago.Content {
 	return ago.NewTextContent(ago.RoleSystem, a.SystemPrompt)
 }
 
-// Compile-time check.
+// Execute implements ago.Strategy, delegating to the ago executor loop.
+func (a *Agent) Execute(ctx context.Context, app *ago.App, contents []*ago.Content, opts *ago.RunOptions) (*ago.RunResult, error) {
+	return ago.RunStrategy(ctx, app, a, contents, opts)
+}
+
+// Compile-time checks.
 var _ ago.AgentConfig = (*Agent)(nil)
+var _ ago.Strategy = (*Agent)(nil)
 
 // copyConfig returns a copy of the agent's Config (or an empty config if nil),
 // so the executor never mutates the original.

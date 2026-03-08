@@ -2,10 +2,27 @@ package ago
 
 import (
 	"context"
+	"fmt"
 	"iter"
 
 	"github.com/Harshal1000/ago/storage"
 )
+
+// ---------------------------------------------------------------------------
+// Strategy
+// ---------------------------------------------------------------------------
+
+// Strategy defines how an App executes agents.
+// *agent.Agent implements this for single-agent execution.
+// ago.Sequential, ago.Parallel, ago.Loop, and ago.Orchestrate return Strategy for multi-agent.
+type Strategy interface {
+	GetName() string
+	Execute(ctx context.Context, app *App, contents []*Content, opts *RunOptions) (*RunResult, error)
+}
+
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
 
 // Hooks holds optional callbacks that fire at key points in the agentic loop.
 // All fields are optional; nil fields are silently skipped.
@@ -31,9 +48,19 @@ type Hooks struct {
 	OnComplete func(ctx context.Context, result *RunResult)
 }
 
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
 // App holds app-level infrastructure shared across all agents and sessions.
 // Create one App per application; pass it to Run, RunSSE, and Compact.
 type App struct {
+	// Name identifies this application. Used as the session Author when set.
+	Name string
+
+	// Description is a human-readable description of this application.
+	Description string
+
 	// Storage is the persistence backend for sessions and events.
 	// nil disables all persistence.
 	Storage storage.Service
@@ -48,7 +75,19 @@ type App struct {
 
 	// Hooks is an optional set of callbacks for observing the agentic loop.
 	Hooks *Hooks
+
+	// Strategy is the default strategy used when Run/RunSSE are called with nil agent.
+	Strategy Strategy
+
+	// isSubAgent marks this App as a sub-agent app created by a strategy.
+	// Sub-agent recorders skip buffering their input contents (to avoid
+	// duplicating events that the strategy already stored).
+	isSubAgent bool
 }
+
+// ---------------------------------------------------------------------------
+// RunOptions / RunResult
+// ---------------------------------------------------------------------------
 
 // RunOptions carries per-turn session identity.
 // Pass nil to run without storage (ephemeral, no session).
@@ -75,16 +114,58 @@ type RunResult struct {
 	SessionID string
 }
 
-// Run executes the agentic loop synchronously and returns the final result.
+// ---------------------------------------------------------------------------
+// App methods
+// ---------------------------------------------------------------------------
+
+// Run executes the strategy synchronously and returns the final result.
+// Pass agent=nil to use app.Strategy; pass a Strategy to override for that call.
 // Pass opts to enable session persistence; nil opts runs ephemerally.
-func (app *App) Run(ctx context.Context, agent AgentConfig, contents []*Content, opts *RunOptions) (*RunResult, error) {
-	return run(ctx, app, agent, contents, opts)
+func (app *App) Run(ctx context.Context, agent Strategy, contents []*Content, opts *RunOptions) (*RunResult, error) {
+	s := agent
+	if s == nil {
+		s = app.Strategy
+	}
+	if s == nil {
+		return nil, fmt.Errorf("ago: no strategy configured")
+	}
+	return s.Execute(ctx, app, contents, opts)
 }
 
-// RunSSE executes the agentic loop with streaming, yielding chunks to the caller.
-// Pass opts to enable session persistence; nil opts runs ephemerally.
-func (app *App) RunSSE(ctx context.Context, agent AgentConfig, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
-	return runSSE(ctx, app, agent, contents, opts)
+// RunSSE executes the strategy with streaming, yielding chunks to the caller.
+// If the strategy also implements AgentConfig (i.e. a single *agent.Agent), true
+// streaming is used. Otherwise the strategy runs synchronously and a single final
+// chunk is yielded.
+// Pass agent=nil to use app.Strategy; pass a Strategy to override for that call.
+func (app *App) RunSSE(ctx context.Context, agent Strategy, contents []*Content, opts *RunOptions) iter.Seq2[*StreamChunk, error] {
+	s := agent
+	if s == nil {
+		s = app.Strategy
+	}
+	if s == nil {
+		return func(yield func(*StreamChunk, error) bool) {
+			yield(nil, fmt.Errorf("ago: no strategy configured"))
+		}
+	}
+	// Single agent: use native streaming path.
+	if ac, ok := s.(AgentConfig); ok {
+		return runSSE(ctx, app, ac, contents, opts)
+	}
+	// Multi-agent strategy: run synchronously and emit a single final chunk.
+	return func(yield func(*StreamChunk, error) bool) {
+		result, err := s.Execute(ctx, app, contents, opts)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		chunk := &StreamChunk{Complete: true}
+		if result.Response != nil && len(result.Response.Candidates) > 0 {
+			chunk.Candidates = result.Response.Candidates
+			usage := result.Response.Usage
+			chunk.Usage = &usage
+		}
+		yield(chunk, nil)
+	}
 }
 
 // RunEphemeral runs an agent for a single turn with no storage and no history.

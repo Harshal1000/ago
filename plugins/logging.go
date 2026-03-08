@@ -16,29 +16,29 @@ import (
 )
 
 // LoggingHooks returns a *ago.Hooks that prints a structured, visual log of
-// the entire agentic loop to w. Pass nil to write to os.Stderr.
+// every agent's execution to w. Pass nil to write to os.Stderr.
 //
-// It covers every observable event in one place:
+// Each agent's turns are labelled with its name so sequential, parallel, loop,
+// and orchestrate strategies are easy to follow at a glance:
 //
-//	[ago] User: My name is Harshal. What is 25 * 4?
+//	[ago] ┌─ planner · turn 1 ────────────────────────────
+//	[ago] │ User: Write a plan to learn Go
+//	[ago] │ ▶  llm   1 messages
+//	[ago] │ ◀  llm   143 tokens · 36 in · 107 out        1.48s
+//	[ago] └─ planner ✓  session=abc · history=2 · 1.48s
 //	[ago]
-//	[ago] ─── turn 1 ───────────────────────────────────
-//	[ago] ▶  llm      3 messages
-//	[ago]    ◆ tool   calculator   operation="multiply" · a=25 · b=4
-//	[ago]    ✓ tool   calculator   {"result":100}                       12ms
-//	[ago] ◀  llm      142 tokens · 89 in · 53 out                     234ms
-//	[ago]
-//	[ago] ─── turn 2 ───────────────────────────────────
-//	[ago] ▶  llm      5 messages
-//	[ago] ◀  llm      87 tokens · 67 in · 20 out                      189ms
-//	[ago]
-//	[ago] Agent: 25 × 4 = 100
-//	[ago] ✓  done     session=abc123 · history=9 · 0.42s
+//	[ago] ┌─ writer · turn 1 ──────────────────────────────
+//	[ago] │ ▶  llm   2 messages
+//	[ago] │ ◀  llm   312 tokens · ...                    2.10s
+//	[ago] └─ writer ✓  history=3 · 3.58s
 func LoggingHooks(w io.Writer) *ago.Hooks {
 	if w == nil {
 		w = os.Stderr
 	}
-	p := &loggingPlugin{w: w}
+	p := &loggingPlugin{
+		w:      w,
+		states: make(map[string]*agentState),
+	}
 	return &ago.Hooks{
 		BeforeLLMCall:  p.beforeLLM,
 		AfterLLMCall:   p.afterLLM,
@@ -50,18 +50,22 @@ func LoggingHooks(w io.Writer) *ago.Hooks {
 
 // ----------- internal -----------
 
-type loggingPlugin struct {
-	w        io.Writer
-	mu       sync.Mutex // serialises writes and protects timing fields
+// agentState holds per-agent timing and iteration state.
+type agentState struct {
 	iter     int
 	runStart time.Time
 	llmStart time.Time
-	starts   sync.Map // map[string]time.Time keyed by FunctionCall.ID (tool timing)
+}
+
+type loggingPlugin struct {
+	w      io.Writer
+	mu     sync.Mutex             // serialises writes and protects states map
+	states map[string]*agentState // keyed by agent name
+	starts sync.Map               // map[callID]time.Time for tool timing
 }
 
 const (
 	prefix      = "[ago] "
-	separator   = "────────────────────────────────"
 	maxArgWidth = 60
 )
 
@@ -71,75 +75,114 @@ func (p *loggingPlugin) writef(format string, args ...any) {
 	p.mu.Unlock()
 }
 
-func (p *loggingPlugin) beforeLLM(_ context.Context, params *ago.GenerateParams) error {
-	p.mu.Lock()
-	p.iter++
-	iter := p.iter
-	if iter == 1 {
-		p.runStart = time.Now()
+// state returns (or lazily creates) the agentState for name. Must be called with mu held.
+func (p *loggingPlugin) state(name string) *agentState {
+	s := p.states[name]
+	if s == nil {
+		s = &agentState{}
+		p.states[name] = s
 	}
-	p.llmStart = time.Now()
+	return s
+}
+
+func agentName(ctx context.Context) string {
+	name, _ := ctx.Value(ago.AgentContextKey{}).(string)
+	if name == "" {
+		return "agent"
+	}
+	return name
+}
+
+func (p *loggingPlugin) beforeLLM(ctx context.Context, params *ago.GenerateParams) error {
+	name := agentName(ctx)
+
+	p.mu.Lock()
+	s := p.state(name)
+	s.iter++
+	iter := s.iter
+	if iter == 1 {
+		s.runStart = time.Now()
+	}
+	s.llmStart = time.Now()
 	p.mu.Unlock()
 
+	bar := strings.Repeat("─", max(0, 44-len(name)-len(fmt.Sprintf("%d", iter))))
+	p.writef("┌─ %s · turn %d %s", name, iter, bar)
 	if iter == 1 {
-		p.writef("User: %s", extractUserText(params.Contents))
-		p.writef("")
+		p.writef("│ User: %s", extractUserText(params.Contents))
 	}
-	p.writef("─── turn %d %s", iter, separator)
-	p.writef("▶  llm      %d messages", len(params.Contents))
+	p.writef("│ ▶  llm   %d messages", len(params.Contents))
 	return nil
 }
 
-func (p *loggingPlugin) afterLLM(_ context.Context, resp *ago.Response) {
+func (p *loggingPlugin) afterLLM(ctx context.Context, resp *ago.Response) {
+	name := agentName(ctx)
+
 	p.mu.Lock()
-	elapsed := time.Since(p.llmStart)
+	var elapsed time.Duration
+	if s := p.states[name]; s != nil {
+		elapsed = time.Since(s.llmStart)
+	}
 	p.mu.Unlock()
 
 	total := resp.Usage.TotalTokenCount
 	in := resp.Usage.PromptTokenCount
 	out := resp.Usage.CandidatesTokenCount
-	p.writef("◀  llm      %d tokens · %d in · %d out%s%s",
+	p.writef("│ ◀  llm   %d tokens · %d in · %d out%s%s",
 		total, in, out, strings.Repeat(" ", 5), fmtDuration(elapsed))
-	p.writef("")
 }
 
-func (p *loggingPlugin) beforeTool(_ context.Context, call *ago.FunctionCall) error {
-	p.starts.Store(call.ID, time.Now())
-	p.writef("   ◆ tool   %-12s %s", call.Name, fmtArgs(call.Args))
+func (p *loggingPlugin) beforeTool(ctx context.Context, call *ago.FunctionCall) error {
+	name := agentName(ctx)
+	p.starts.Store(call.ID, [2]any{time.Now(), name})
+	p.writef("│ [%s]   ◆ tool   %-12s %s", name, call.Name, fmtArgs(call.Args))
 	return nil
 }
 
-func (p *loggingPlugin) afterTool(_ context.Context, call *ago.FunctionCall, result *ago.ToolResult) {
+func (p *loggingPlugin) afterTool(ctx context.Context, call *ago.FunctionCall, result *ago.ToolResult) {
 	var elapsed time.Duration
-	if t, ok := p.starts.LoadAndDelete(call.ID); ok {
-		elapsed = time.Since(t.(time.Time))
+	var name string
+	if v, ok := p.starts.LoadAndDelete(call.ID); ok {
+		pair := v.([2]any)
+		elapsed = time.Since(pair[0].(time.Time))
+		name, _ = pair[1].(string)
+	}
+	if name == "" {
+		name = agentName(ctx)
 	}
 	if result.Error != nil {
-		p.writef("   ✗ tool   %-12s %-*s  %s",
-			call.Name, maxArgWidth, "error: "+result.Error.Error(), fmtDuration(elapsed))
+		p.writef("│ [%s]   ✗ tool   %-12s %-*s  %s",
+			name, call.Name, maxArgWidth, "error: "+result.Error.Error(), fmtDuration(elapsed))
 		return
 	}
-	p.writef("   ✓ tool   %-12s %-*s  %s",
-		call.Name, maxArgWidth, fmtResult(result.Response), fmtDuration(elapsed))
+	p.writef("│ [%s]   ✓ tool   %-12s %-*s  %s",
+		name, call.Name, maxArgWidth, fmtResult(result.Response), fmtDuration(elapsed))
 }
 
-func (p *loggingPlugin) onComplete(_ context.Context, result *ago.RunResult) {
+func (p *loggingPlugin) onComplete(ctx context.Context, result *ago.RunResult) {
+	name := agentName(ctx)
+
 	p.mu.Lock()
-	total := time.Since(p.runStart)
-	p.iter = 0 // reset for next run on this plugin instance
+	var total time.Duration
+	if s := p.states[name]; s != nil {
+		total = time.Since(s.runStart)
+		delete(p.states, name) // reset for next run of this agent
+	}
 	p.mu.Unlock()
 
 	if text := extractResponseText(result.Response); text != "" {
-		p.writef("Agent: %s", text)
+		p.writef("│ %s", truncateLines(text, 5, 120))
 	}
-	p.writef("✓  done     session=%s · history=%d · %s",
-		result.SessionID, len(result.History), fmtDuration(total))
-	p.writef("═══════════════════════════════════════════════════")
+	sessionPart := ""
+	if result.SessionID != "" {
+		sessionPart = fmt.Sprintf("session=%s · ", result.SessionID)
+	}
+	p.writef("└─ %s ✓  %shistory=%d · %s", name, sessionPart, len(result.History), fmtDuration(total))
+	p.writef("")
 }
 
 // ----------- content helpers -----------
 
-// extractUserText returns the text of the last user-role content in contents.
 func extractUserText(contents []*ago.Content) string {
 	for i := len(contents) - 1; i >= 0; i-- {
 		c := contents[i]
@@ -159,7 +202,6 @@ func extractUserText(contents []*ago.Content) string {
 	return "(no user message)"
 }
 
-// extractResponseText returns the plain text from a Response, or empty string.
 func extractResponseText(resp *ago.Response) string {
 	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0].Content == nil {
 		return ""
@@ -230,4 +272,21 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-3] + "..."
+}
+
+// truncateLines returns the first maxLines non-empty lines of s, with each
+// line capped at maxWidth characters. Appended "…" if lines were dropped.
+func truncateLines(s string, maxLines, maxWidth int) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	var out []string
+	for _, l := range lines {
+		if len(out) >= maxLines {
+			out = append(out, "…")
+			break
+		}
+		if l = strings.TrimSpace(l); l != "" {
+			out = append(out, truncate(l, maxWidth))
+		}
+	}
+	return strings.Join(out, "\n│ ")
 }

@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS events (
     session_id UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     message_id UUID NOT NULL,
     user_id    UUID NOT NULL,
+    agent      TEXT NOT NULL DEFAULT '',
     content    JSONB NOT NULL,
     error      TEXT NOT NULL DEFAULT '',
     usage      JSONB,
@@ -77,6 +78,7 @@ CREATE TABLE IF NOT EXISTS events (
     metadata   JSONB
 );
 CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id);
+CREATE INDEX IF NOT EXISTS idx_events_agent ON events(session_id, agent);
 `
 	if _, err := db.pool.Exec(ctx, ddl); err != nil {
 		return fmt.Errorf("ago: storage: migrate: %w", err)
@@ -193,9 +195,9 @@ func (db *database) CreateEvent(ctx context.Context, event *Event) error {
 		event.CreatedAt = time.Now()
 	}
 	_, err := db.pool.Exec(ctx,
-		`INSERT INTO events (id, session_id, message_id, user_id, content, error, usage, created_at, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		event.ID, event.SessionID, event.MessageID, event.UserID,
+		`INSERT INTO events (id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		event.ID, event.SessionID, event.MessageID, event.UserID, event.Agent,
 		event.Content, event.Error, nullJSON(event.Usage),
 		event.CreatedAt, nullJSON(event.Metadata),
 	)
@@ -217,9 +219,9 @@ func (db *database) CreateEvents(ctx context.Context, events []*Event) error {
 			event.CreatedAt = now
 		}
 		batch.Queue(
-			`INSERT INTO events (id, session_id, message_id, user_id, content, error, usage, created_at, metadata)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			event.ID, event.SessionID, event.MessageID, event.UserID,
+			`INSERT INTO events (id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			event.ID, event.SessionID, event.MessageID, event.UserID, event.Agent,
 			event.Content, event.Error, nullJSON(event.Usage),
 			event.CreatedAt, nullJSON(event.Metadata),
 		)
@@ -236,7 +238,7 @@ func (db *database) CreateEvents(ctx context.Context, events []*Event) error {
 
 func (db *database) GetEvents(ctx context.Context, sessionID string) ([]*Event, error) {
 	rows, err := db.pool.Query(ctx,
-		`SELECT id, session_id, message_id, user_id, content, error, usage, created_at, metadata
+		`SELECT id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata
 		 FROM events WHERE session_id = $1 ORDER BY created_at ASC`, sessionID,
 	)
 	if err != nil {
@@ -247,7 +249,7 @@ func (db *database) GetEvents(ctx context.Context, sessionID string) ([]*Event, 
 	var events []*Event
 	for rows.Next() {
 		e := &Event{}
-		if err := rows.Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID,
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID, &e.Agent,
 			&e.Content, &e.Error, &e.Usage, &e.CreatedAt, &e.Metadata); err != nil {
 			return nil, fmt.Errorf("ago: storage: scan event: %w", err)
 		}
@@ -265,16 +267,16 @@ func (db *database) GetRecentEvents(ctx context.Context, sessionID string, limit
 	)
 	if limit > 0 {
 		rows, err = db.pool.Query(ctx,
-			`SELECT id, session_id, message_id, user_id, content, error, usage, created_at, metadata
+			`SELECT id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata
 			 FROM (
-			   SELECT id, session_id, message_id, user_id, content, error, usage, created_at, metadata
+			   SELECT id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata
 			   FROM events WHERE session_id = $1 ORDER BY created_at DESC LIMIT $2
 			 ) sub ORDER BY created_at ASC`,
 			sessionID, limit,
 		)
 	} else {
 		rows, err = db.pool.Query(ctx,
-			`SELECT id, session_id, message_id, user_id, content, error, usage, created_at, metadata
+			`SELECT id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata
 			 FROM events WHERE session_id = $1 ORDER BY created_at ASC`, sessionID,
 		)
 	}
@@ -286,7 +288,7 @@ func (db *database) GetRecentEvents(ctx context.Context, sessionID string, limit
 	var events []*Event
 	for rows.Next() {
 		e := &Event{}
-		if err := rows.Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID,
+		if err := rows.Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID, &e.Agent,
 			&e.Content, &e.Error, &e.Usage, &e.CreatedAt, &e.Metadata); err != nil {
 			return nil, fmt.Errorf("ago: storage: scan event: %w", err)
 		}
@@ -298,9 +300,9 @@ func (db *database) GetRecentEvents(ctx context.Context, sessionID string, limit
 func (db *database) GetEvent(ctx context.Context, id string) (*Event, error) {
 	e := &Event{}
 	err := db.pool.QueryRow(ctx,
-		`SELECT id, session_id, message_id, user_id, content, error, usage, created_at, metadata
+		`SELECT id, session_id, message_id, user_id, agent, content, error, usage, created_at, metadata
 		 FROM events WHERE id = $1`, id,
-	).Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID,
+	).Scan(&e.ID, &e.SessionID, &e.MessageID, &e.UserID, &e.Agent,
 		&e.Content, &e.Error, &e.Usage, &e.CreatedAt, &e.Metadata)
 	if err != nil {
 		return nil, fmt.Errorf("ago: storage: get event: %w", err)

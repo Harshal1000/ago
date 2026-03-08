@@ -33,63 +33,26 @@ func main() {
 	defer svc.Close()
 
 	app := &ago.App{
+		Name:           "ago-example",
 		Storage:        svc,
 		HistoryLimit:   50,
 		IncludeHistory: true,
 		Hooks:          plugins.LoggingHooks(nil),
 	}
 
-	helperAgent := &agent.Agent{
-		Name:    "helper-agent",
-		Backend: agent.BackendGenAI,
-		Model:   "gemini-2.0-flash-lite",
-		SystemPrompt: `You are a lightweight helper. You handle simple tasks efficiently:
-- Word counting: count words in text precisely
-- Current time: report the exact current time
-Always give short, direct answers.`,
-		Tools: []ago.Tool{
-			&tools.FunctionTool{
-				ToolName:    "word_count",
-				Description: "Count words in a given text",
-				Parameters: &ago.Schema{
-					Type: ago.TypeObject,
-					Properties: map[string]*ago.Schema{
-						"text": {Type: ago.TypeString, Description: "Text to count words in"},
-					},
-					Required: []string{"text"},
-				},
-				Fn: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-					text, _ := args["text"].(string)
-					return map[string]any{"count": len(strings.Fields(text))}, nil
-				},
-			},
-			&tools.FunctionTool{
-				ToolName:    "current_time",
-				Description: "Get the current date and time",
-				Parameters:  &ago.Schema{Type: ago.TypeObject, Properties: map[string]*ago.Schema{}},
-				Fn: func(ctx context.Context, args map[string]any) (map[string]any, error) {
-					now := time.Now()
-					return map[string]any{"datetime": now.Format(time.RFC3339), "unix": now.Unix()}, nil
-				},
-				ToolOptions: ago.ToolOptions{SkipSynthesis: true},
-			},
-		},
-		Config:        &ago.GenerateConfig{MaxOutputTokens: 500},
-		MaxIterations: 3,
-	}
-	if err := helperAgent.InitLLM(); err != nil {
-		log.Fatalf("Failed to init helper agent LLM: %v", err)
-	}
+	// ---------------------------------------------------------------------------
+	// Build shared tools
+	// ---------------------------------------------------------------------------
 
 	calculatorTool := &tools.FunctionTool{
 		ToolName:    "calculator",
-		Description: "Perform basic math operations: add, subtract, multiply, divide, sqrt, power.",
+		Description: "Perform basic math: add, subtract, multiply, divide, sqrt, power.",
 		Parameters: &ago.Schema{
 			Type: ago.TypeObject,
 			Properties: map[string]*ago.Schema{
-				"operation": {Type: ago.TypeString, Description: "Math operation", Enum: []string{"add", "subtract", "multiply", "divide", "sqrt", "power"}},
-				"a":         {Type: ago.TypeNumber, Description: "First number"},
-				"b":         {Type: ago.TypeNumber, Description: "Second number (not needed for sqrt)"},
+				"operation": {Type: ago.TypeString, Enum: []string{"add", "subtract", "multiply", "divide", "sqrt", "power"}},
+				"a":         {Type: ago.TypeNumber},
+				"b":         {Type: ago.TypeNumber},
 			},
 			Required: []string{"operation", "a"},
 		},
@@ -124,71 +87,312 @@ Always give short, direct answers.`,
 		},
 	}
 
-	helperTool := &tools.AgentTool{
-		ToolName:    "helper",
-		Description: "Delegate simple tasks (word counting, current time) to a lightweight helper agent. Cost-effective for non-math queries.",
-		Agent:       helperAgent,
-	}
-
-	mainAgent := &agent.Agent{
-		Name:    "main-agent",
-		Backend: agent.BackendGenAI,
-		Model:   "gemini-2.0-flash",
-		SystemPrompt: `You are a helpful assistant with access to tools.
-Use the calculator for any math operations.
-Delegate word counting and time queries to the helper agent — it is cheaper and faster for those tasks.
-Always use tools rather than guessing.`,
-		Tools: []ago.Tool{calculatorTool, helperTool},
-		Config: &ago.GenerateConfig{
-			MaxOutputTokens: 1000,
-			Temperature:     &[]float64{0.7}[0],
+	wordCountTool := &tools.FunctionTool{
+		ToolName:    "word_count",
+		Description: "Count words in a given text",
+		Parameters: &ago.Schema{
+			Type: ago.TypeObject,
+			Properties: map[string]*ago.Schema{
+				"text": {Type: ago.TypeString},
+			},
+			Required: []string{"text"},
 		},
+		Fn: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			text, _ := args["text"].(string)
+			return map[string]any{"count": len(strings.Fields(text))}, nil
+		},
+	}
+
+	currentTimeTool := &tools.FunctionTool{
+		ToolName:    "current_time",
+		Description: "Get the current date and time",
+		Parameters:  &ago.Schema{Type: ago.TypeObject, Properties: map[string]*ago.Schema{}},
+		Fn: func(ctx context.Context, args map[string]any) (map[string]any, error) {
+			now := time.Now()
+			return map[string]any{"datetime": now.Format(time.RFC3339)}, nil
+		},
+		ToolOptions: ago.ToolOptions{SkipSynthesis: true},
+	}
+
+	// ---------------------------------------------------------------------------
+	// Build agents
+	// ---------------------------------------------------------------------------
+
+	mustInit := func(a *agent.Agent) *agent.Agent {
+		if err := a.InitLLM(); err != nil {
+			log.Fatalf("Failed to init LLM for %s: %v", a.Name, err)
+		}
+		return a
+	}
+
+	plannerAgent := mustInit(&agent.Agent{
+		Name:         "planner",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a task planner. Given a goal, produce a concise step-by-step plan. Be brief.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 300},
+	})
+
+	writerAgent := mustInit(&agent.Agent{
+		Name:         "writer",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a writer. Given a plan, expand it into clear, readable prose. Be concise.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 500},
+	})
+
+	researchAgent1 := mustInit(&agent.Agent{
+		Name:         "researcher-1",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a research specialist focused on technical aspects. Give a 2-3 sentence summary.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 200},
+	})
+
+	researchAgent2 := mustInit(&agent.Agent{
+		Name:         "researcher-2",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a research specialist focused on business impact. Give a 2-3 sentence summary.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 200},
+	})
+
+	synthAgent := mustInit(&agent.Agent{
+		Name:         "synthesizer",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a synthesizer. Combine research findings from multiple sources into one cohesive summary.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 400},
+	})
+
+	criticAgent := mustInit(&agent.Agent{
+		Name:         "critic",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: `You are a critic. Review the text and respond with either "APPROVED" if it is good enough, or suggest one specific improvement.`,
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 150},
+	})
+
+	refinerAgent := mustInit(&agent.Agent{
+		Name:         "refiner",
+		Backend:      agent.BackendGenAI,
+		Model:        "gemini-2.5-flash-lite",
+		SystemPrompt: "You are a refiner. Apply the critic's suggestion to improve the text. Output only the improved text.",
+		Config:       &ago.GenerateConfig{MaxOutputTokens: 400},
+	})
+
+	helperAgent := mustInit(&agent.Agent{
+		Name:          "helper",
+		Backend:       agent.BackendGenAI,
+		Model:         "gemini-2.5-flash-lite",
+		SystemPrompt:  "You are a lightweight helper for word counting and time queries. Always use tools, never guess.",
+		Tools:         []ago.Tool{wordCountTool, currentTimeTool},
+		Config:        &ago.GenerateConfig{MaxOutputTokens: 200},
+		MaxIterations: 3,
+	})
+
+	coordinatorAgent := mustInit(&agent.Agent{
+		Name:    "coordinator",
+		Backend: agent.BackendGenAI,
+		Model:   "gemini-2.5-flash",
+		SystemPrompt: `You are a coordinator. Delegate tasks to the right specialist agents using tool calls.
+Use the calculator for math, the helper for word/time queries.
+Synthesize results into a final answer.`,
+		Tools:         []ago.Tool{calculatorTool},
+		Config:        &ago.GenerateConfig{MaxOutputTokens: 600},
 		MaxIterations: 5,
+	})
+
+	userID := uuid.New().String()
+	timeout := 30 * time.Second
+
+	// ---------------------------------------------------------------------------
+	// 1. Single agent (app.Strategy field)
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 1. Single Agent ===")
+	singleApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy:       plannerAgent,
 	}
-	if err := mainAgent.InitLLM(); err != nil {
-		log.Fatalf("Failed to init main agent LLM: %v", err)
-	}
-
-	var sessionID string
-	opts := &ago.RunOptions{UserID: uuid.New().String(), Author: mainAgent.Name}
-
-	turns := []string{
-		"My name is Harshal. What is 25 * 4?",
-		"Now take that result and add 100 to it.",
-		"What's my name? Also count the words in: 'The quick brown fox jumps over the lazy dog'",
-		"What time is it right now?",
-		"Summarize what we've done in this conversation.",
-	}
-
-	for _, userMsg := range turns {
-		opts.SessionID = sessionID
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-
-		result, err := app.Run(ctx, mainAgent, []*ago.Content{
-			ago.NewTextContent(ago.RoleUser, userMsg),
-		}, opts)
-		cancel()
-
-		if err != nil {
-			log.Printf("run error: %v", err)
-			continue
-		}
-
-		if sessionID == "" {
-			sessionID = result.SessionID
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	result, err := singleApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "Plan how to learn Go in 30 days."),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("single agent error: %v", err)
+	} else {
+		fmt.Printf("Planner: %s\n", firstLine(extractText(result)))
 	}
 
-	opts.SessionID = sessionID
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// ---------------------------------------------------------------------------
+	// 2. Sequential: planner → writer
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 2. Sequential (planner → writer) ===")
+	seqApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy:       ago.Sequential(plannerAgent, writerAgent),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	result, err = seqApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "Write a short article about the benefits of Go for backend development."),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("sequential error: %v", err)
+	} else {
+		fmt.Printf("Final article (first line): %s\n", firstLine(extractText(result)))
+	}
+
+	// ---------------------------------------------------------------------------
+	// 3. Parallel: two researchers → synthesizer
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 3. Parallel (researcher-1 + researcher-2 → synthesizer) ===")
+	parallelApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy:       ago.Parallel(researchAgent1, researchAgent2).Aggregate(synthAgent),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	result, err = parallelApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "What is the impact of AI on software development?"),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("parallel error: %v", err)
+	} else {
+		fmt.Printf("Synthesis (first line): %s\n", firstLine(extractText(result)))
+	}
+
+	// ---------------------------------------------------------------------------
+	// 4. Loop: critic + refiner, max 3 iterations or until approved
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 4. Loop (critic + refiner, max 3, until APPROVED) ===")
+	loopApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy: ago.Loop(criticAgent, refinerAgent).
+			Max(3).
+			Until(func(output string) bool { return strings.Contains(output, "APPROVED") }),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	result, err = loopApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "Go is a great programming language."),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("loop error: %v", err)
+	} else {
+		fmt.Printf("Final text (first line): %s\n", firstLine(extractText(result)))
+	}
+
+	// ---------------------------------------------------------------------------
+	// 5. Orchestrate: coordinator LLM dispatches workers via tool calls
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 5. Orchestrate (coordinator with calculator + helper workers) ===")
+	orchApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy:       ago.Orchestrate(coordinatorAgent, helperAgent),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	result, err = orchApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "What is 144 * 12? Also, what time is it now?"),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("orchestrate error: %v", err)
+	} else {
+		fmt.Printf("Coordinator answer (first line): %s\n", firstLine(extractText(result)))
+	}
+
+	// ---------------------------------------------------------------------------
+	// 6. Nested: Sequential(Parallel(...).Aggregate(synth), writer)
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 6. Nested: Sequential(Parallel(r1,r2).Aggregate(synth), writer) ===")
+	nestedApp := &ago.App{
+		Name:           "ago-example",
+		Storage:        svc,
+		HistoryLimit:   20,
+		IncludeHistory: false,
+		Hooks:          plugins.LoggingHooks(nil),
+		Strategy: ago.Sequential(
+			ago.Parallel(researchAgent1, researchAgent2).Aggregate(synthAgent),
+			writerAgent,
+		),
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
+	result, err = nestedApp.Run(ctx, nil, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "Explain the future of cloud computing."),
+	}, &ago.RunOptions{UserID: userID})
+	cancel()
+	if err != nil {
+		log.Printf("nested error: %v", err)
+	} else {
+		fmt.Printf("Final article (first line): %s\n", firstLine(extractText(result)))
+	}
+
+	// ---------------------------------------------------------------------------
+	// 7. RunSSE on a single agent (streaming path)
+	// ---------------------------------------------------------------------------
+	fmt.Println("\n=== 7. RunSSE (single agent streaming) ===")
+	ctx, cancel = context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-
-	for _, err := range app.RunSSE(ctx, mainAgent, []*ago.Content{
-		ago.NewTextContent(ago.RoleUser, "Give me the square root of the final number from our conversation."),
+	opts := &ago.RunOptions{UserID: userID}
+	for chunk, err := range app.RunSSE(ctx, plannerAgent, []*ago.Content{
+		ago.NewTextContent(ago.RoleUser, "Give me a 3-step plan to learn Docker."),
 	}, opts) {
 		if err != nil {
 			log.Printf("stream error: %v", err)
 			break
 		}
+		if chunk != nil && chunk.Complete {
+			fmt.Printf("Stream complete.\n")
+		}
 	}
+}
+
+func extractText(r *ago.RunResult) string {
+	if r == nil || r.Response == nil || len(r.Response.Candidates) == 0 {
+		return ""
+	}
+	c := r.Response.Candidates[0].Content
+	if c == nil {
+		return ""
+	}
+	var parts []string
+	for _, p := range c.Parts {
+		if p.Text != "" {
+			parts = append(parts, p.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	if len(s) > 120 {
+		return s[:120] + "..."
+	}
+	return s
 }

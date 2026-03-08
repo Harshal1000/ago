@@ -15,6 +15,11 @@ type ToolOptions struct {
 	// SkipSynthesis, when true, causes the executor to return the tool result
 	// directly without an additional LLM synthesis turn.
 	SkipSynthesis bool
+
+	// IsAgentCall, when true, marks this tool as an agent-transfer call.
+	// The executor stores its call/response as RoleAgent events in storage
+	// while keeping RoleTool in LLM history (the LLM always sees role=tool).
+	IsAgentCall bool
 }
 
 // Tool is the interface for all tools usable by the executor.

@@ -38,6 +38,7 @@ const (
 	RoleModel  Role = "model"
 	RoleSystem Role = "system"
 	RoleTool   Role = "tool"
+	RoleAgent  Role = "agent" // strategy-level agent-to-agent call/response
 )
 
 // ---------------------------------------------------------------------------
@@ -191,6 +192,24 @@ func NewFunctionResponseContent(responses ...*FunctionResponse) *Content {
 		parts[i] = &Part{FunctionResponse: r}
 	}
 	return &Content{Role: RoleTool, Parts: parts}
+}
+
+// NewAgentCallContent returns agent Content (strategy-level) representing a call to a sub-agent.
+func NewAgentCallContent(calls ...*FunctionCall) *Content {
+	parts := make([]*Part, len(calls))
+	for i, c := range calls {
+		parts[i] = &Part{FunctionCall: c}
+	}
+	return &Content{Role: RoleAgent, Parts: parts}
+}
+
+// NewAgentResponseContent returns agent Content (strategy-level) representing a sub-agent response.
+func NewAgentResponseContent(responses ...*FunctionResponse) *Content {
+	parts := make([]*Part, len(responses))
+	for i, r := range responses {
+		parts[i] = &Part{FunctionResponse: r}
+	}
+	return &Content{Role: RoleAgent, Parts: parts}
 }
 
 // NewUserContent returns user Content built from the given parts.

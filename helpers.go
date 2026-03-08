@@ -56,8 +56,10 @@ func initHistory(ctx context.Context, rec *recorder, contents []*Content, includ
 		}
 	}
 
-	// Buffer the incoming contents for batch persistence on Flush.
-	if rec != nil {
+	// Buffer incoming contents for persistence, unless this is a sub-agent.
+	// Strategies (Sequential/Parallel/Loop) call bufferStrategyInput once at the
+	// top level, so sub-agents must not re-buffer the same contents.
+	if rec != nil && !rec.skipInputBuffer {
 		for _, c := range contents {
 			rec.Buffer(c)
 		}
@@ -161,6 +163,49 @@ func executeToolsParallel(ctx context.Context, calls []*FunctionCall, toolMap ma
 		results[res.index] = res.result
 	}
 	return results, nil
+}
+
+func isAgentCallTool(toolMap map[string]Tool, name string) bool {
+	t, ok := toolMap[name]
+	return ok && t.Options().IsAgentCall
+}
+
+// bufferCallsForStorage stores function calls in the recorder, splitting by IsAgentCall.
+// Agent-transfer calls are stored as RoleAgent; regular tool calls as RoleModel (function call content).
+func bufferCallsForStorage(rec *recorder, calls []*FunctionCall, toolMap map[string]Tool) {
+	var regular, agentCalls []*FunctionCall
+	for _, c := range calls {
+		if isAgentCallTool(toolMap, c.Name) {
+			agentCalls = append(agentCalls, c)
+		} else {
+			regular = append(regular, c)
+		}
+	}
+	if len(regular) > 0 {
+		rec.Buffer(NewFunctionCallContent(regular...))
+	}
+	if len(agentCalls) > 0 {
+		rec.Buffer(NewAgentCallContent(agentCalls...))
+	}
+}
+
+// bufferResponsesForStorage stores function responses in the recorder, splitting by IsAgentCall.
+// Agent-transfer responses are stored as RoleAgent; regular tool responses as RoleTool.
+func bufferResponsesForStorage(rec *recorder, calls []*FunctionCall, responses []*FunctionResponse, toolMap map[string]Tool) {
+	var regular, agentResps []*FunctionResponse
+	for i, c := range calls {
+		if isAgentCallTool(toolMap, c.Name) {
+			agentResps = append(agentResps, responses[i])
+		} else {
+			regular = append(regular, responses[i])
+		}
+	}
+	if len(regular) > 0 {
+		rec.Buffer(NewFunctionResponseContent(regular...))
+	}
+	if len(agentResps) > 0 {
+		rec.Buffer(NewAgentResponseContent(agentResps...))
+	}
 }
 
 func synthesizeToolResponse(responses []*FunctionResponse) *Response {

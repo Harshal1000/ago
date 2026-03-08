@@ -92,6 +92,7 @@ type Event struct {
 	SessionID string          `json:"session_id"`
 	MessageID string          `json:"message_id"`
 	UserID    string          `json:"user_id"`
+	Agent     string          `json:"agent,omitempty"` // which agent produced this event
 	Content   json.RawMessage `json:"content"`
 	Error     string          `json:"error,omitempty"`
 	Usage     json.RawMessage `json:"usage,omitempty"`
